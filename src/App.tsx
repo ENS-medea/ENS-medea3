@@ -27,7 +27,8 @@ import {
   Play,
   Home,
   Bell,
-  BellRing
+  BellRing,
+  BellOff
 } from 'lucide-react';
 import { AttachedImage, AttachedPdf, CommentItem, LessonItem, ModuleItem, SpecializationItem } from './types';
 import logoAsset from './assets/logo.png';
@@ -56,6 +57,7 @@ import {
   updateAdminNewsPostsInFirestore,
   ADMIN_NEWS_MODULE_ID,
   publishStudentNotificationToFirestore,
+  clearStudentNotificationFromFirestore,
   subscribeLatestStudentNotification,
   StudentNotificationPayload
 } from './services/firebase';
@@ -134,6 +136,7 @@ export default function App() {
 
   // Admin News & Updates Posts (Home icon feed - synced from Firebase Firestore)
   const [adminNewsPosts, setAdminNewsPosts] = useState<LessonItem[]>([]);
+  const [isNewsLoaded, setIsNewsLoaded] = useState(false);
 
   // Specializations (Default 'PEP arabe' + dynamically synced from Firebase Firestore)
   const [specializations, setSpecializations] = useState<SpecializationItem[]>(DEFAULT_SPECIALIZATIONS);
@@ -149,6 +152,7 @@ export default function App() {
 
   // Student Notifications on Post Publish
   const [notifyStudentsOnPublish, setNotifyStudentsOnPublish] = useState(false);
+  const [activeStudentNotif, setActiveStudentNotif] = useState<StudentNotificationPayload | null>(null);
   const [incomingStudentNotif, setIncomingStudentNotif] = useState<StudentNotificationPayload | null>(null);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | 'unsupported'>(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
@@ -255,6 +259,9 @@ export default function App() {
     const unsubNews = subscribeAdminNewsPosts((posts) => {
       const now = Date.now();
       setAdminNewsPosts(processLessonsList(posts || [], now));
+      setIsNewsLoaded(true);
+    }, () => {
+      setIsNewsLoaded(true);
     });
 
     return () => {
@@ -267,50 +274,91 @@ export default function App() {
   // Real-time Student Notification Broadcast Subscription
   useEffect(() => {
     const unsubNotif = subscribeLatestStudentNotification((notif) => {
-      if (isCurrentAdminLoggedIn()) return;
-      const ageMs = Date.now() - (notif.createdAt || 0);
-      if (ageMs > 1000 * 60 * 60 * 12) return;
-
-      try {
-        if (sessionStorage.getItem('ens_dismissed_notif_id') === notif.id) {
-          return;
-        }
-      } catch {}
-
-      setIncomingStudentNotif(notif);
-
-      if (
-        typeof window !== 'undefined' &&
-        'Notification' in window &&
-        Notification.permission === 'granted' &&
-        ageMs < 120000
-      ) {
-        let alreadyNative = false;
-        try {
-          alreadyNative = sessionStorage.getItem('ens_native_notified_id') === notif.id;
-          if (!alreadyNative) {
-            sessionStorage.setItem('ens_native_notified_id', notif.id);
-          }
-        } catch {}
-
-        if (!alreadyNative) {
-          try {
-            new Notification(
-              notif.targetType === 'news'
-                ? `خبر جديد: ${notif.title}`
-                : `منشور جديد في ${notif.moduleName || 'المقياس'}: ${notif.title}`,
-              {
-                body: notif.body || 'انقر لفتح المنصة ومشاهدة المنشور الجديد',
-                icon: NEW_LOGO_URL,
-              }
-            );
-          } catch {}
-        }
+      setActiveStudentNotif(notif);
+      if (!notif) {
+        setIncomingStudentNotif(null);
       }
     });
 
     return () => unsubNotif();
   }, []);
+
+  // Strictly synchronize active/incoming notification with actual live posts in Firestore:
+  // If a post or its module was deleted, clear the notification immediately and never show it.
+  useEffect(() => {
+    if (!activeStudentNotif) {
+      setIncomingStudentNotif(null);
+      return;
+    }
+
+    if (!isYear1Loaded || !isYear2Loaded || !isNewsLoaded) {
+      return;
+    }
+
+    const targetId = String(activeStudentNotif.id);
+    const existsInPosts =
+      activeStudentNotif.targetType === 'news'
+        ? adminNewsPosts.some(p => String(p.id) === targetId)
+        : [...year1Modules, ...year2Modules].some(mod =>
+            (mod.lessons || []).some(l => String(l.id) === targetId)
+          );
+
+    if (!existsInPosts) {
+      setActiveStudentNotif(null);
+      setIncomingStudentNotif(null);
+      clearStudentNotificationFromFirestore().catch(() => {});
+      return;
+    }
+
+    if (isAdmin || isCurrentAdminLoggedIn()) {
+      setIncomingStudentNotif(null);
+      return;
+    }
+
+    const ageMs = Date.now() - (activeStudentNotif.createdAt || 0);
+    if (ageMs > 1000 * 60 * 60 * 12) {
+      setIncomingStudentNotif(null);
+      return;
+    }
+
+    try {
+      if (sessionStorage.getItem('ens_dismissed_notif_id') === activeStudentNotif.id) {
+        setIncomingStudentNotif(null);
+        return;
+      }
+    } catch {}
+
+    setIncomingStudentNotif(activeStudentNotif);
+
+    if (
+      typeof window !== 'undefined' &&
+      'Notification' in window &&
+      Notification.permission === 'granted' &&
+      ageMs < 120000
+    ) {
+      let alreadyNative = false;
+      try {
+        alreadyNative = sessionStorage.getItem('ens_native_notified_id') === activeStudentNotif.id;
+        if (!alreadyNative) {
+          sessionStorage.setItem('ens_native_notified_id', activeStudentNotif.id);
+        }
+      } catch {}
+
+      if (!alreadyNative) {
+        try {
+          new Notification(
+            activeStudentNotif.targetType === 'news'
+              ? `خبر جديد: ${activeStudentNotif.title}`
+              : `منشور جديد في ${activeStudentNotif.moduleName || 'المقياس'}: ${activeStudentNotif.title}`,
+            {
+              body: activeStudentNotif.body || 'انقر لفتح المنصة ومشاهدة المنشور الجديد',
+              icon: NEW_LOGO_URL,
+            }
+          );
+        } catch {}
+      }
+    }
+  }, [activeStudentNotif, adminNewsPosts, year1Modules, year2Modules, isYear1Loaded, isYear2Loaded, isNewsLoaded, isAdmin]);
 
   // Periodic Automated Like Growth Sync (every 15 seconds to track minute-by-minute progression cleanly)
   // Distributes shard updates evenly across clastyzoom-4badf (Server 1) & clasty-zoom (Server 2)
@@ -856,6 +904,16 @@ export default function App() {
     e.stopPropagation();
     if (!isAdmin) return;
 
+    const targetModules = selectedYear === 'first' ? year1Modules : year2Modules;
+    const deletedMod = targetModules.find(m => String(m.id) === String(moduleId));
+    const activeBelongsToDeletedModule = Boolean(
+      activeStudentNotif &&
+      (
+        String(activeStudentNotif.moduleId || '') === String(moduleId) ||
+        (deletedMod?.lessons || []).some(l => String(l.id) === String(activeStudentNotif.id))
+      )
+    );
+
     if (selectedYear === 'first') {
       setYear1Modules(prev => prev.filter(m => m.id !== moduleId));
     } else {
@@ -864,6 +922,12 @@ export default function App() {
     if (activeModuleId === moduleId) {
       setActiveModuleId(null);
       setLessonSearchQuery('');
+    }
+
+    if (activeBelongsToDeletedModule) {
+      setActiveStudentNotif(null);
+      setIncomingStudentNotif(null);
+      clearStudentNotificationFromFirestore().catch(() => {});
     }
 
     try {
@@ -1046,6 +1110,46 @@ export default function App() {
     } catch {}
   };
 
+  const handleClearActivePostNotification = async () => {
+    if (!isAdmin) return;
+    try {
+      await clearStudentNotificationFromFirestore();
+      setActiveStudentNotif(null);
+      setIncomingStudentNotif(null);
+      setAdminSuccessNotification('تم نزع إشعار المنشور للطلبة بنجاح');
+      setTimeout(() => setAdminSuccessNotification(null), 3000);
+    } catch {
+      setAdminSuccessNotification('تعذر نزع الإشعار حالياً، يرجى إعادة المحاولة');
+      setTimeout(() => setAdminSuccessNotification(null), 3000);
+    }
+  };
+
+  const handleActivatePostNotification = async (lesson: LessonItem) => {
+    if (!isAdmin) return;
+    try {
+      await publishStudentNotificationToFirestore({
+        id: String(lesson.id),
+        title: lesson.title,
+        body:
+          lesson.description?.trim() ||
+          (isNewsView
+            ? 'نُشر خبر جديد في قسم أخبار الإدارة'
+            : `تم نشر ${lesson.type || 'درس'} في مقياس ${activeModule?.name || ''}`),
+        postType: lesson.type || '',
+        targetType: isNewsView ? 'news' : 'module',
+        moduleId: isNewsView ? undefined : (activeModule?.id ? String(activeModule.id) : lesson.moduleId),
+        moduleName: activeModule?.name,
+        yearId: selectedYear,
+        createdAt: Date.now(),
+      });
+      setAdminSuccessNotification('تم تفعيل وإرسال إشعار هذا المنشور للطلبة بنجاح');
+      setTimeout(() => setAdminSuccessNotification(null), 3000);
+    } catch {
+      setAdminSuccessNotification('تعذر تفعيل الإشعار حالياً، يرجى إعادة المحاولة');
+      setTimeout(() => setAdminSuccessNotification(null), 3000);
+    }
+  };
+
   // Add Lesson or Admin News Post (Admin only)
   const handleAddLesson = async (e?: React.FormEvent) => {
     if (e) {
@@ -1176,6 +1280,11 @@ export default function App() {
     if (!isAdmin || (!activeModuleId && !isNewsView)) return;
     const targetIdStr = String(lessonId);
     const updatedLessons = activeFeedLessons.filter(l => String(l.id) !== targetIdStr);
+    if (String(activeStudentNotif?.id || '') === targetIdStr) {
+      setActiveStudentNotif(null);
+      setIncomingStudentNotif(null);
+      await clearStudentNotificationFromFirestore().catch(() => {});
+    }
     await syncModuleLessons(updatedLessons);
     if (commentsModalLesson && String(commentsModalLesson.id) === targetIdStr) {
       setCommentsModalLesson(null);
@@ -1331,6 +1440,23 @@ export default function App() {
 
     try {
       await syncModuleLessons(updatedLessons, true);
+      if (String(activeStudentNotif?.id || '') === editIdStr) {
+        publishStudentNotificationToFirestore({
+          id: editIdStr,
+          title: trimmedTitle,
+          body:
+            editLessonDescription.trim() ||
+            (isNewsView
+              ? 'نُشر خبر جديد في قسم أخبار الإدارة'
+              : `تم نشر ${editLessonType || 'درس'} في مقياس ${activeModule?.name || ''}`),
+          postType: editLessonType,
+          targetType: isNewsView ? 'news' : 'module',
+          moduleId: isNewsView ? undefined : (activeModule?.id ? String(activeModule.id) : editingLesson.moduleId),
+          moduleName: activeModule?.name,
+          yearId: selectedYear,
+          createdAt: activeStudentNotif?.createdAt || Date.now(),
+        }).catch(() => {});
+      }
       setEditLessonUploadError(null);
       setEditingLesson(null);
       setAdminSuccessNotification('تم تعديل وحفظ بيانات المنشور وتاريخ النشر بنجاح');
@@ -1658,25 +1784,25 @@ export default function App() {
   return (
     <div className="min-h-screen w-full overflow-x-hidden bg-white text-black font-['Cairo',sans-serif] selection:bg-black selection:text-white">
       
-      {/* 1. Top Header Bar: Responsive header across all screen sizes */}
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-neutral-200 min-h-[70px] sm:min-h-[82px] shadow-2xs w-full">
-        <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3 h-[70px] sm:h-[82px] px-2.5 sm:px-6">
+      {/* 1. Top Header Bar: Responsive header with enlarged app logo */}
+      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-neutral-200 min-h-[78px] sm:min-h-[92px] shadow-2xs w-full">
+        <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3 h-[78px] sm:h-[92px] px-2.5 sm:px-6">
           
           {/* Far Left Side: App Logo / Name (Enlarged & Crisp) */}
           <div className="flex items-center h-full shrink-0" dir="ltr">
             {/* Logo Image (7-Tap Hidden Trigger: COMPLETELY SILENT AND INVISIBLE) */}
             <div 
               onClick={handleLogoTap}
-              className="flex items-center justify-center cursor-pointer select-none group relative h-full py-1"
+              className="flex items-center justify-center cursor-pointer select-none group relative h-full py-0"
               title="ENS Medea"
             >
               <img 
                 src={logoAsset} 
                 alt="ENS Medea Logo" 
-                className={`h-12 sm:h-14 md:h-16 w-auto ${
+                className={`h-16 sm:h-[74px] md:h-20 w-auto ${
                   isAdmin && (activeModule || isNewsView)
-                    ? 'max-w-[140px] sm:max-w-none'
-                    : 'max-w-[180px] sm:max-w-none'
+                    ? 'max-w-[155px] sm:max-w-none'
+                    : 'max-w-[205px] sm:max-w-none'
                 } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = NEW_LOGO_URL;
@@ -1865,6 +1991,39 @@ export default function App() {
               <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
               <span>{adminSuccessNotification}</span>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Active Student Notification Control Bar (Allows removing/deactivating active post notification from anywhere) */}
+      {isAdmin && activeStudentNotif && (
+        <div className="w-full max-w-7xl mx-auto px-2 sm:px-4 md:px-6 mt-3" dir="rtl">
+          <div className="p-3 sm:p-3.5 bg-neutral-100 border border-neutral-300 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 text-xs shadow-2xs">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-black text-white flex items-center justify-center shrink-0">
+                <BellRing className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="font-bold text-black truncate">
+                  إشعار منشور مفعّل للطلبة: {activeStudentNotif.title}
+                </p>
+                <p className="text-[11px] text-neutral-600 truncate">
+                  {activeStudentNotif.targetType === 'news'
+                    ? 'قسم أخبار المدير'
+                    : `مقياس: ${activeStudentNotif.moduleName || 'مقياس دراسي'}`}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleClearActivePostNotification}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black hover:bg-neutral-800 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer shrink-0"
+              title="نزع وإلغاء إشعار هذا المنشور عن الطلبة"
+            >
+              <BellOff className="w-3.5 h-3.5" />
+              <span>نزع الإشعار</span>
+            </button>
           </div>
         </div>
       )}
@@ -2398,9 +2557,21 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Admin Action Menu: Toggle Auto-Likes, Edit Post, Pin Post & Delete */}
+                        {/* Admin Action Menu: Remove Notification (if active), Toggle Auto-Likes, Edit Post, Pin Post & Delete */}
                         {isAdmin && (
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center flex-wrap gap-1.5">
+                            {activeStudentNotif?.id === String(lesson.id) && (
+                              <button
+                                type="button"
+                                onClick={handleClearActivePostNotification}
+                                className="px-2 py-1.5 rounded-xl text-[11px] font-semibold transition-colors flex items-center gap-1 border bg-red-50 text-red-600 border-red-200 hover:bg-red-100 cursor-pointer"
+                                title="نزع إشعار هذا المنشور الذي قمت بتفعيله للطلبة"
+                              >
+                                <BellOff className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">نزع الإشعار</span>
+                              </button>
+                            )}
+
                             {/* Pause / Resume Auto-Generated Likes Button (Admin only) */}
                             <button
                               type="button"
@@ -3806,6 +3977,42 @@ export default function App() {
                   {editLessonUploadError}
                 </div>
               )}
+
+              {/* Student Notification Status & Removal / Activation in Edit Modal */}
+              <div className="p-3.5 bg-neutral-50 rounded-2xl border border-neutral-200 flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  {activeStudentNotif?.id === String(editingLesson.id) ? (
+                    <BellRing className="w-4 h-4 text-black shrink-0" />
+                  ) : (
+                    <Bell className="w-4 h-4 text-neutral-500 shrink-0" />
+                  )}
+                  <span className="text-xs font-semibold text-black">
+                    {activeStudentNotif?.id === String(editingLesson.id)
+                      ? 'إشعار الطلبة مفعّل حالياً لهذا المنشور'
+                      : 'إشعار الطلبة غير مفعّل لهذا المنشور'}
+                  </span>
+                </div>
+
+                {activeStudentNotif?.id === String(editingLesson.id) ? (
+                  <button
+                    type="button"
+                    onClick={handleClearActivePostNotification}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    <BellOff className="w-3.5 h-3.5" />
+                    <span>نزع إشعار المنشور</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleActivatePostNotification(editingLesson)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black hover:bg-neutral-800 text-white text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>تفعيل إشعار المنشور</span>
+                  </button>
+                )}
+              </div>
 
               {/* Actions */}
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-neutral-200">

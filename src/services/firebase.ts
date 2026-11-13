@@ -293,6 +293,22 @@ export async function publishStudentNotificationToFirestore(
     moduleName: payload.moduleName ? String(payload.moduleName) : null,
     yearId: payload.yearId || null,
     createdAt: Number(payload.createdAt) || Date.now(),
+    active: true,
+    lastUpdated: serverTimestamp(),
+  });
+}
+
+/**
+ * Clear / deactivate the currently active student notification (Admin only)
+ */
+export async function clearStudentNotificationFromFirestore(): Promise<void> {
+  const notifDocRef = doc(db, 'system_config', 'latest_student_notification');
+  await setDoc(notifDocRef, {
+    id: null,
+    title: '',
+    body: '',
+    active: false,
+    clearedAt: Date.now(),
     lastUpdated: serverTimestamp(),
   });
 }
@@ -301,14 +317,14 @@ export async function publishStudentNotificationToFirestore(
  * Subscribe to the latest Admin notification broadcast in real-time
  */
 export function subscribeLatestStudentNotification(
-  onNotification: (notif: StudentNotificationPayload) => void
+  onNotification: (notif: StudentNotificationPayload | null) => void
 ): () => void {
   try {
     const notifDocRef = doc(db, 'system_config', 'latest_student_notification');
     return onSnapshot(notifDocRef, (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        if (data?.id && data?.title) {
+        if (data?.active !== false && data?.id && data?.title) {
           onNotification({
             id: String(data.id),
             title: String(data.title),
@@ -320,8 +336,10 @@ export function subscribeLatestStudentNotification(
             yearId: data.yearId === 'first' || data.yearId === 'second' ? data.yearId : undefined,
             createdAt: typeof data.createdAt === 'number' ? data.createdAt : Date.now(),
           });
+          return;
         }
       }
+      onNotification(null);
     }, () => {
       // Ignore transient listener errors
     });
