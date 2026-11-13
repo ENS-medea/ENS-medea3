@@ -1784,11 +1784,11 @@ export default function App() {
   return (
     <div className="min-h-screen w-full overflow-x-hidden bg-white text-black font-['Cairo',sans-serif] selection:bg-black selection:text-white">
       
-      {/* 1. Top Header Bar: Responsive header with enlarged app logo */}
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-neutral-200 min-h-[78px] sm:min-h-[92px] shadow-2xs w-full">
-        <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3 h-[78px] sm:h-[92px] px-2.5 sm:px-6">
+      {/* 1. Top Header Bar: Compact height with clear logo & icons */}
+      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-neutral-200 min-h-[64px] sm:min-h-[74px] shadow-2xs w-full">
+        <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3 h-[64px] sm:h-[74px] px-2.5 sm:px-6">
           
-          {/* Far Left Side: App Logo / Name (Enlarged & Crisp) */}
+          {/* Far Left Side: App Logo / Name */}
           <div className="flex items-center h-full shrink-0" dir="ltr">
             {/* Logo Image (7-Tap Hidden Trigger: COMPLETELY SILENT AND INVISIBLE) */}
             <div 
@@ -1799,10 +1799,10 @@ export default function App() {
               <img 
                 src={logoAsset} 
                 alt="ENS Medea Logo" 
-                className={`h-16 sm:h-[74px] md:h-20 w-auto ${
+                className={`h-[52px] sm:h-[62px] md:h-[66px] w-auto ${
                   isAdmin && (activeModule || isNewsView)
-                    ? 'max-w-[155px] sm:max-w-none'
-                    : 'max-w-[205px] sm:max-w-none'
+                    ? 'max-w-[130px] sm:max-w-none'
+                    : 'max-w-[180px] sm:max-w-none'
                 } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = NEW_LOGO_URL;
@@ -1829,7 +1829,7 @@ export default function App() {
                   setNewsTypeFilter('all');
                 }
               }}
-              className={`p-1.5 sm:p-2 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
+              className={`p-2 sm:p-2.5 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
                 isNewsView
                   ? 'bg-black text-white border-black shadow-xs'
                   : 'text-neutral-700 hover:text-black hover:bg-neutral-100 border-neutral-200 shadow-2xs'
@@ -1837,14 +1837,14 @@ export default function App() {
               title={isNewsView ? "العودة لقائمة المقاييس والسنة" : "منشورات المدير (الأخبار وآخر المستجدات)"}
               aria-label={isNewsView ? "العودة لقائمة المقاييس والسنة" : "منشورات المدير"}
             >
-              <Home className="w-4 h-4" />
+              <Home className="w-5 h-5 sm:w-[22px] sm:h-[22px]" />
             </button>
 
             {/* Search Magnifying Glass Icon Button */}
             <button
               type="button"
               onClick={() => setIsSearchVisible(prev => !prev)}
-              className={`p-1.5 sm:p-2 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
+              className={`p-2 sm:p-2.5 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
                 isSearchVisible 
                   ? 'bg-black text-white border-black shadow-xs' 
                   : 'text-neutral-700 hover:text-black hover:bg-neutral-100 border-neutral-200 shadow-2xs'
@@ -1852,7 +1852,7 @@ export default function App() {
               title={isSearchVisible ? "إخفاء شريط البحث" : "البحث (عدسة مكبرة)"}
               aria-label="البحث"
             >
-              <Search className="w-4 h-4" />
+              <Search className="w-5 h-5 sm:w-[22px] sm:h-[22px]" />
             </button>
 
             {/* Admin Status & Logout */}
@@ -1913,7 +1913,7 @@ export default function App() {
                   setLessonTypeFilter('all');
                   setNewsTypeFilter('all');
                 }}
-                className="p-1.5 sm:p-2 rounded-xl text-black hover:bg-neutral-100 transition-all duration-150 cursor-pointer group flex items-center justify-center shrink-0 border border-neutral-200 shadow-2xs"
+                className="p-2 sm:p-2.5 rounded-xl text-black hover:bg-neutral-100 transition-all duration-150 cursor-pointer group flex items-center justify-center shrink-0 border border-neutral-200 shadow-2xs"
                 title="العودة لقائمة المقاييس"
                 aria-label="العودة"
               >
@@ -1924,7 +1924,7 @@ export default function App() {
                   strokeWidth="2.5" 
                   strokeLinecap="round" 
                   strokeLinejoin="round" 
-                  className="w-4 h-4 sm:w-5 sm:h-5 group-hover:translate-x-0.5 transition-transform"
+                  className="w-5 h-5 sm:w-[22px] sm:h-[22px] group-hover:translate-x-0.5 transition-transform"
                 >
                   <path d="M15 14l5-5-5-5" />
                   <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13" />
