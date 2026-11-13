@@ -13,7 +13,7 @@ import {
   serverTimestamp,
   increment
 } from 'firebase/firestore';
-import { ModuleItem, LessonItem, SpecializationItem } from '../types';
+import { ModuleItem, LessonItem, SpecializationItem, StudentSubmissionItem } from '../types';
 import { hashString } from './likesAlgorithm';
 
 /**
@@ -166,6 +166,7 @@ function sanitizeLessonsForFirestore(lessons: LessonItem[], fallbackModuleId: st
     likesCount: Number(lesson.likesCount) || 0,
     baseLikes: typeof lesson.baseLikes === 'number' ? lesson.baseLikes : null,
     userLikes: typeof lesson.userLikes === 'number' ? lesson.userLikes : (lesson.isLiked ? 1 : 0),
+    manualLikesOffset: typeof lesson.manualLikesOffset === 'number' ? lesson.manualLikesOffset : null,
     lastLikesSyncedAt: typeof lesson.lastLikesSyncedAt === 'number' ? lesson.lastLikesSyncedAt : null,
     autoLikesEnabled: lesson.autoLikesEnabled !== false,
     frozenAutoLikes: typeof lesson.frozenAutoLikes === 'number' ? lesson.frozenAutoLikes : null,
@@ -175,6 +176,7 @@ function sanitizeLessonsForFirestore(lessons: LessonItem[], fallbackModuleId: st
       : (hashString(String(lesson.id || '')) % 2 === 0 ? 1 : 2),
     isLiked: Boolean(lesson.isLiked),
     isPinned: Boolean(lesson.isPinned),
+    commentsEnabled: lesson.commentsEnabled !== false,
     timestamp: Number(lesson.timestamp) || Date.now(),
     createdAt: String(lesson.createdAt || new Date().toLocaleDateString('ar-DZ')),
     // Images: only direct URLs / media refs stored in Firestore
@@ -680,6 +682,36 @@ export function getCachedResolvedMediaUrl(url?: string): string | undefined {
   return resolvedMediaCache.get(mediaId);
 }
 
+/**
+ * Resolves a `firestore-media://{id}` URL into a base64 Data URL (`data:...;base64,...`)
+ * for environments (such as Telegram's Android/iOS in-app browser) that block `blob:` downloads.
+ */
+export async function resolveMediaDataUrl(url: string): Promise<string> {
+  if (!url || !isFirestoreMediaUrl(url)) {
+    return url;
+  }
+  const mediaId = url.slice(FIRESTORE_MEDIA_PREFIX.length);
+  const metaSnap = await getDoc(doc(db, 'uploaded_media', mediaId));
+  if (!metaSnap.exists()) {
+    throw new Error('لم يتم العثور على الملف في السحابة');
+  }
+  const meta = metaSnap.data();
+  const mimeType = String(meta.mimeType || 'application/octet-stream');
+
+  const chunksSnap = await getDocs(collection(db, 'uploaded_media', mediaId, 'chunks'));
+  const chunkDocs: { index: number; data: string }[] = [];
+  chunksSnap.forEach((d) => {
+    const data = d.data();
+    chunkDocs.push({
+      index: typeof data.index === 'number' ? data.index : Number(d.id) || 0,
+      data: String(data.data || ''),
+    });
+  });
+  chunkDocs.sort((a, b) => a.index - b.index);
+  const fullBase64 = chunkDocs.map((c) => c.data).join('');
+  return `data:${mimeType};base64,${fullBase64}`;
+}
+
 export async function uploadImageToImgBB(
   file: File, 
   apiKey = 'd89ee562e31505c87fc6037eb0a12e3e'
@@ -811,6 +843,7 @@ export interface ShardLikeState {
   moduleId: string;
   publishedAt: number;
   userLikes: number;
+  manualLikesOffset?: number | null;
   autoLikesEnabled: boolean;
   frozenAutoLikes: number | null;
   autoLikesResumedAt: number | null;
@@ -819,7 +852,7 @@ export interface ShardLikeState {
 }
 
 /**
- * Syncs a lesson's complete likes state (automated + real user likes + admin pause state)
+ * Syncs a lesson's complete likes state (automated + real user likes + admin pause state + manual offset)
  * strictly to its assigned Likes shard server (50% Server 1 / 50% Server 2).
  */
 export async function syncLessonLikesToShard(lesson: LessonItem): Promise<void> {
@@ -833,6 +866,7 @@ export async function syncLessonLikesToShard(lesson: LessonItem): Promise<void> 
       moduleId: String(lesson.moduleId || ''),
       publishedAt: Number(lesson.timestamp) || Date.now(),
       userLikes: typeof lesson.userLikes === 'number' ? Math.max(0, lesson.userLikes) : 0,
+      manualLikesOffset: typeof lesson.manualLikesOffset === 'number' ? lesson.manualLikesOffset : null,
       autoLikesEnabled: lesson.autoLikesEnabled !== false,
       frozenAutoLikes: typeof lesson.frozenAutoLikes === 'number' ? lesson.frozenAutoLikes : null,
       autoLikesResumedAt: typeof lesson.autoLikesResumedAt === 'number' ? lesson.autoLikesResumedAt : null,
@@ -873,6 +907,7 @@ export async function updateRealUserLikeOnShard(
         moduleId: String(lesson.moduleId || ''),
         publishedAt: Number(lesson.timestamp) || Date.now(),
         userLikes: Math.max(0, updatedUserLikes),
+        manualLikesOffset: typeof lesson.manualLikesOffset === 'number' ? lesson.manualLikesOffset : null,
         autoLikesEnabled: lesson.autoLikesEnabled !== false,
         frozenAutoLikes: typeof lesson.frozenAutoLikes === 'number' ? lesson.frozenAutoLikes : null,
         autoLikesResumedAt: typeof lesson.autoLikesResumedAt === 'number' ? lesson.autoLikesResumedAt : null,
@@ -907,6 +942,7 @@ export function subscribeLessonLikesFromShards(
           const data = snap.data();
           onShardUpdate(String(lesson.id), {
             userLikes: typeof data.userLikes === 'number' ? Math.max(0, data.userLikes) : undefined,
+            manualLikesOffset: typeof data.manualLikesOffset === 'number' ? data.manualLikesOffset : undefined,
             autoLikesEnabled: typeof data.autoLikesEnabled === 'boolean' ? data.autoLikesEnabled : undefined,
             frozenAutoLikes: typeof data.frozenAutoLikes === 'number' ? data.frozenAutoLikes : undefined,
             autoLikesResumedAt: typeof data.autoLikesResumedAt === 'number' ? data.autoLikesResumedAt : undefined,
@@ -928,4 +964,84 @@ export function subscribeLessonLikesFromShards(
       try { u(); } catch {}
     });
   };
+}
+
+// ==========================================
+// 5. STUDENT SUBMISSIONS TO ADMIN (Firestore `student_submissions`)
+// ==========================================
+
+export function subscribeStudentSubmissions(
+  onUpdate: (items: StudentSubmissionItem[]) => void,
+  onError?: (error: any) => void
+): () => void {
+  try {
+    const q = query(collection(db, 'student_submissions'));
+    return onSnapshot(q, (snapshot) => {
+      const list: StudentSubmissionItem[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        list.push({
+          id: docSnap.id,
+          senderName: String(data.senderName || 'طالب / زائر'),
+          yearLabel: String(data.yearLabel || 'عام'),
+          moduleName: String(data.moduleName || ''),
+          title: String(data.title || ''),
+          description: String(data.description || ''),
+          images: Array.isArray(data.images) ? data.images : [],
+          pdfs: Array.isArray(data.pdfs) ? data.pdfs : [],
+          isRead: Boolean(data.isRead),
+          createdAt: String(data.createdAt || new Date().toLocaleDateString('ar-DZ')),
+          timestamp: typeof data.timestamp === 'number' ? data.timestamp : Date.now(),
+        });
+      });
+      list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      onUpdate(list);
+    }, (err) => {
+      console.warn('Firestore student submissions snapshot error:', err);
+      if (onError) onError(err);
+    });
+  } catch (e) {
+    console.warn('Firestore student submissions subscription failed:', e);
+    if (onError) onError(e);
+    return () => {};
+  }
+}
+
+export async function addStudentSubmissionToFirestore(item: StudentSubmissionItem): Promise<void> {
+  const subRef = doc(db, 'student_submissions', String(item.id));
+  await setDoc(subRef, {
+    senderName: String(item.senderName || 'طالب / زائر'),
+    yearLabel: String(item.yearLabel || 'عام'),
+    moduleName: String(item.moduleName || ''),
+    title: String(item.title || ''),
+    description: String(item.description || ''),
+    images: (item.images || []).map(img => ({
+      id: String(img.id || Date.now()),
+      url: String(img.url || ''),
+      name: String(img.name || ''),
+    })),
+    pdfs: (item.pdfs || []).map(pdf => ({
+      id: String(pdf.id || Date.now()),
+      name: String(pdf.name || 'document.pdf'),
+      size: String(pdf.size || ''),
+      url: String(pdf.url || pdf.downloadUrl || '#'),
+      downloadUrl: pdf.downloadUrl ? String(pdf.downloadUrl) : (pdf.url ? String(pdf.url) : null),
+      viewUrl: pdf.viewUrl ? String(pdf.viewUrl) : (pdf.url ? String(pdf.url) : null),
+      coverImageUrl: pdf.coverImageUrl ? String(pdf.coverImageUrl) : null,
+    })),
+    isRead: Boolean(item.isRead),
+    createdAt: String(item.createdAt || new Date().toLocaleDateString('ar-DZ')),
+    timestamp: Number(item.timestamp) || Date.now(),
+    serverCreatedAt: serverTimestamp(),
+  });
+}
+
+export async function markStudentSubmissionReadInFirestore(submissionId: string, isRead: boolean): Promise<void> {
+  const subRef = doc(db, 'student_submissions', String(submissionId));
+  await setDoc(subRef, { isRead: Boolean(isRead) }, { merge: true });
+}
+
+export async function deleteStudentSubmissionFromFirestore(submissionId: string): Promise<void> {
+  const subRef = doc(db, 'student_submissions', String(submissionId));
+  await deleteDoc(subRef);
 }

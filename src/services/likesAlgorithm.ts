@@ -169,15 +169,17 @@ export function calculateAutomatedLikes(lesson: LessonItem, currentNow = Date.no
         ? 1
         : 0;
 
-  const totalCalculated = simulatedLikes + userLikes;
+  const hasManualOffset = typeof lesson.manualLikesOffset === 'number';
+  const manualOffset = hasManualOffset ? (lesson.manualLikesOffset as number) : 0;
 
-  // If automated likes are paused by Admin, total is strictly frozenAutoLikes + real userLikes
-  // (allow real user toggle down if they unlike, while never losing other real user likes)
-  if (lesson.autoLikesEnabled === false) {
-    return Math.max(userLikes, totalCalculated);
+  const totalCalculated = Math.max(0, simulatedLikes + userLikes + manualOffset);
+
+  // If Admin manually adjusted likes or paused automated likes, respect exact calculated total
+  if (lesson.autoLikesEnabled === false || hasManualOffset) {
+    return totalCalculated;
   }
 
-  // Monotonic safety when auto-likes are active
+  // Monotonic safety when auto-likes are active without manual offset
   const previousLikes = typeof lesson.likesCount === 'number' ? lesson.likesCount : 0;
   return Math.max(previousLikes, totalCalculated);
 }

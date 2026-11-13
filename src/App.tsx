@@ -28,9 +28,12 @@ import {
   Home,
   Bell,
   BellRing,
-  BellOff
+  BellOff,
+  ExternalLink,
+  Copy,
+  Inbox
 } from 'lucide-react';
-import { AttachedImage, AttachedPdf, CommentItem, LessonItem, ModuleItem, SpecializationItem } from './types';
+import { AttachedImage, AttachedPdf, CommentItem, LessonItem, ModuleItem, SpecializationItem, StudentSubmissionItem } from './types';
 import logoAsset from './assets/logo.png';
 import avatarAsset from './assets/avatar.jpg';
 import { 
@@ -53,13 +56,19 @@ import {
   updateRealUserLikeOnShard,
   subscribeLessonLikesFromShards,
   resolveMediaUrl,
+  resolveMediaDataUrl,
+  isFirestoreMediaUrl,
   subscribeAdminNewsPosts,
   updateAdminNewsPostsInFirestore,
   ADMIN_NEWS_MODULE_ID,
   publishStudentNotificationToFirestore,
   clearStudentNotificationFromFirestore,
   subscribeLatestStudentNotification,
-  StudentNotificationPayload
+  StudentNotificationPayload,
+  subscribeStudentSubmissions,
+  addStudentSubmissionToFirestore,
+  markStudentSubmissionReadInFirestore,
+  deleteStudentSubmissionFromFirestore
 } from './services/firebase';
 import { CloudImage } from './components/CloudImage';
 import { 
@@ -70,6 +79,69 @@ import {
 
 const NEW_LOGO_URL = 'https://i.ibb.co/zTZcJ8zq/Screenshot-20261110-131301-Chrome.png';
 const ADMIN_AVATAR_URL = 'https://i.ibb.co/d4NCmpYL/1785099526878.jpg';
+
+const formatPostTime = (timestamp?: number, fallbackId?: string): string => {
+  let ts = timestamp && !isNaN(timestamp) ? timestamp : 0;
+  if (!ts && fallbackId) {
+    const parsedPrefix = Number(String(fallbackId).split('-')[0]);
+    if (!isNaN(parsedPrefix) && parsedPrefix > 1000000000000) {
+      ts = parsedPrefix;
+    }
+  }
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleTimeString('ar-DZ', {
+      timeZone: 'Africa/Algiers',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+  } catch {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+};
+
+const getTimeInputFromTimestamp = (timestamp?: number): string => {
+  const ts = timestamp && !isNaN(timestamp) ? timestamp : Date.now();
+  try {
+    const parts = new Date(ts).toLocaleTimeString('en-GB', {
+      timeZone: 'Africa/Algiers',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    return /^\d{2}:\d{2}$/.test(parts) ? parts : '12:00';
+  } catch {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+};
+
+const detectTelegramInAppBrowser = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const w = window as any;
+  return (
+    /Telegram/i.test(ua) ||
+    Boolean(w.TelegramWebviewProxy || w.TelegramWebview || w.Telegram?.WebView) ||
+    /t\.me/i.test(document.referrer || '')
+  );
+};
+
+const getExternalBrowserHref = (url: string): string => {
+  if (typeof navigator === 'undefined') return url;
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) {
+    if (url.startsWith('https://')) {
+      return `intent://${url.slice(8)}#Intent;scheme=https;package=com.android.chrome;action=android.intent.action.VIEW;end`;
+    }
+    if (url.startsWith('http://')) {
+      return `intent://${url.slice(7)}#Intent;scheme=http;package=com.android.chrome;action=android.intent.action.VIEW;end`;
+    }
+  }
+  return url;
+};
 
 // Anonymous session ID generator for non-admin public visitors (e.g. مجهول الهوية #4821)
 const getSessionAnonId = (): string => {
@@ -92,6 +164,7 @@ const getInitialNavParams = () => {
       spec: 'pep-arabe',
       moduleId: null as string | null,
       isNews: false,
+      isSubmissions: false,
     };
   }
   const params = new URLSearchParams(window.location.search);
@@ -100,11 +173,13 @@ const getInitialNavParams = () => {
   const specParam = params.get('spec');
   const moduleParam = params.get('module');
   const isNews = view === 'news';
+  const isSubmissions = view === 'submit';
   return {
     year: yearParam === 'first' ? ('first' as const) : ('second' as const),
     spec: specParam || 'pep-arabe',
-    moduleId: isNews ? null : (moduleParam || null),
+    moduleId: (isNews || isSubmissions) ? null : (moduleParam || null),
     isNews,
+    isSubmissions,
   };
 };
 
@@ -113,6 +188,17 @@ export default function App() {
   const [selectedYear, setSelectedYear] = useState<'first' | 'second'>(initialNav.year);
   const [activeModuleId, setActiveModuleId] = useState<string | null>(initialNav.moduleId);
   const [isNewsView, setIsNewsView] = useState<boolean>(initialNav.isNews);
+  const [isSubmissionsView, setIsSubmissionsView] = useState<boolean>(initialNav.isSubmissions);
+
+  // Telegram In-App Browser detection & Download helper state
+  const [isTelegramBrowser] = useState<boolean>(() => detectTelegramInAppBrowser());
+  const [telegramBannerDismissed, setTelegramBannerDismissed] = useState(false);
+  const [telegramDownloadFallback, setTelegramDownloadFallback] = useState<{
+    filename: string;
+    directUrl?: string;
+    dataUrl?: string;
+    isPdf?: boolean;
+  } | null>(null);
 
   // Admin Authentication state
   const [isAdmin, setIsAdmin] = useState<boolean>(() => isCurrentAdminLoggedIn());
@@ -137,6 +223,23 @@ export default function App() {
   // Admin News & Updates Posts (Home icon feed - synced from Firebase Firestore)
   const [adminNewsPosts, setAdminNewsPosts] = useState<LessonItem[]>([]);
   const [isNewsLoaded, setIsNewsLoaded] = useState(false);
+
+  // Student Submissions to Admin (Send icon feed - synced from Firebase Firestore)
+  const [studentSubmissions, setStudentSubmissions] = useState<StudentSubmissionItem[]>([]);
+  const [isSubmissionsLoaded, setIsSubmissionsLoaded] = useState(false);
+  const [subSenderName, setSubSenderName] = useState('');
+  const [subYearLabel, setSubYearLabel] = useState('السنة الثانية');
+  const [subModuleName, setSubModuleName] = useState('');
+  const [subTitle, setSubTitle] = useState('');
+  const [subDescription, setSubDescription] = useState('');
+  const [subImages, setSubImages] = useState<AttachedImage[]>([]);
+  const [subPdfs, setSubPdfs] = useState<AttachedPdf[]>([]);
+  const [isUploadingSubImages, setIsUploadingSubImages] = useState(false);
+  const [isUploadingSubPdfs, setIsUploadingSubPdfs] = useState(false);
+  const [isSubmittingStudentContent, setIsSubmittingStudentContent] = useState(false);
+  const [subFormError, setSubFormError] = useState<string | null>(null);
+  const [subFormSuccess, setSubFormSuccess] = useState<string | null>(null);
+  const subDescRef = useRef<HTMLTextAreaElement>(null);
 
   // Specializations (Default 'PEP arabe' + dynamically synced from Firebase Firestore)
   const [specializations, setSpecializations] = useState<SpecializationItem[]>(DEFAULT_SPECIALIZATIONS);
@@ -172,7 +275,10 @@ export default function App() {
       params.delete('spec');
     }
 
-    if (isNewsView) {
+    if (isSubmissionsView) {
+      params.set('view', 'submit');
+      params.delete('module');
+    } else if (isNewsView) {
       params.set('view', 'news');
       params.delete('module');
     } else if (activeModuleId) {
@@ -189,7 +295,30 @@ export default function App() {
     if (nextUrl !== currentUrl) {
       window.history.replaceState(null, '', nextUrl);
     }
-  }, [selectedYear, selectedSpecializationId, activeModuleId, isNewsView]);
+  }, [selectedYear, selectedSpecializationId, activeModuleId, isNewsView, isSubmissionsView]);
+
+  // Attempt automatic external Chrome handoff on Android when opened inside Telegram in-app browser
+  useEffect(() => {
+    if (!isTelegramBrowser || typeof window === 'undefined') return;
+    if (window.top !== window.self) return;
+    const ua = navigator.userAgent || '';
+    if (!/Android/i.test(ua)) return;
+
+    try {
+      if (sessionStorage.getItem('ens_tg_auto_external_tried') === 'true') return;
+      sessionStorage.setItem('ens_tg_auto_external_tried', 'true');
+    } catch {}
+
+    const externalHref = getExternalBrowserHref(window.location.href);
+    if (externalHref !== window.location.href) {
+      const a = document.createElement('a');
+      a.href = externalHref;
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+  }, [isTelegramBrowser]);
 
   // Handle browser Back/Forward navigation cleanly
   useEffect(() => {
@@ -199,6 +328,7 @@ export default function App() {
       setSelectedSpecializationId(nav.spec);
       setActiveModuleId(nav.moduleId);
       setIsNewsView(nav.isNews);
+      setIsSubmissionsView(nav.isSubmissions);
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -214,14 +344,16 @@ export default function App() {
     return () => unsubSpecs();
   }, []);
 
-  // Real-time Firebase Firestore Subscription for Modules & Admin News Posts
+  // Real-time Firebase Firestore Subscription for Modules, Admin News Posts & Student Submissions
   useEffect(() => {
     const processLessonsList = (incLessons: LessonItem[], now: number): LessonItem[] => {
       return incLessons.map(l => {
         const automatedLikes = calculateAutomatedLikes(l, now);
         return {
           ...l,
-          likesCount: l.autoLikesEnabled === false ? automatedLikes : Math.max(l.likesCount || 0, automatedLikes),
+          likesCount: (l.autoLikesEnabled === false || typeof l.manualLikesOffset === 'number')
+            ? automatedLikes
+            : Math.max(l.likesCount || 0, automatedLikes),
         };
       });
     };
@@ -264,10 +396,18 @@ export default function App() {
       setIsNewsLoaded(true);
     });
 
+    const unsubSubmissions = subscribeStudentSubmissions((items) => {
+      setStudentSubmissions(items || []);
+      setIsSubmissionsLoaded(true);
+    }, () => {
+      setIsSubmissionsLoaded(true);
+    });
+
     return () => {
       unsubYear1();
       unsubYear2();
       unsubNews();
+      unsubSubmissions();
     };
   }, []);
 
@@ -360,76 +500,14 @@ export default function App() {
     }
   }, [activeStudentNotif, adminNewsPosts, year1Modules, year2Modules, isYear1Loaded, isYear2Loaded, isNewsLoaded, isAdmin]);
 
-  // Periodic Automated Like Growth Sync (every 15 seconds to track minute-by-minute progression cleanly)
-  // Distributes shard updates evenly across clastyzoom-4badf (Server 1) & clasty-zoom (Server 2)
-  useEffect(() => {
-    const syncAutomatedLikes = () => {
-      const now = Date.now();
-
-      // Check year1 modules
-      setYear1Modules(prevModules => {
-        let changed = false;
-        const nextModules = prevModules.map(mod => {
-          const { updatedLessons, hasChanges } = applyAutomatedLikesToLessons(mod.lessons || [], now);
-          if (hasChanges) {
-            changed = true;
-            updateModuleLessonsInFirestore('first', mod.id, updatedLessons).catch(() => {});
-            updatedLessons.forEach((l, idx) => {
-              if (l.likesCount !== (mod.lessons || [])[idx]?.likesCount) {
-                syncLessonLikesToShard(l).catch(() => {});
-              }
-            });
-            return { ...mod, lessons: updatedLessons };
-          }
-          return mod;
-        });
-        return changed ? nextModules : prevModules;
-      });
-
-      // Check year2 modules
-      setYear2Modules(prevModules => {
-        let changed = false;
-        const nextModules = prevModules.map(mod => {
-          const { updatedLessons, hasChanges } = applyAutomatedLikesToLessons(mod.lessons || [], now);
-          if (hasChanges) {
-            changed = true;
-            updateModuleLessonsInFirestore('second', mod.id, updatedLessons).catch(() => {});
-            updatedLessons.forEach((l, idx) => {
-              if (l.likesCount !== (mod.lessons || [])[idx]?.likesCount) {
-                syncLessonLikesToShard(l).catch(() => {});
-              }
-            });
-            return { ...mod, lessons: updatedLessons };
-          }
-          return mod;
-        });
-        return changed ? nextModules : prevModules;
-      });
-
-      // Check Admin News posts
-      setAdminNewsPosts(prevPosts => {
-        const { updatedLessons, hasChanges } = applyAutomatedLikesToLessons(prevPosts || [], now);
-        if (hasChanges) {
-          updateAdminNewsPostsInFirestore(updatedLessons).catch(() => {});
-          updatedLessons.forEach((l, idx) => {
-            if (l.likesCount !== prevPosts[idx]?.likesCount) {
-              syncLessonLikesToShard(l).catch(() => {});
-            }
-          });
-          return updatedLessons;
-        }
-        return prevPosts;
-      });
-    };
-
-    const timeoutId = setTimeout(syncAutomatedLikes, 3000);
-    const intervalId = setInterval(syncAutomatedLikes, 15000);
-
-    return () => {
-      clearTimeout(timeoutId);
-      clearInterval(intervalId);
-    };
-  }, []);
+  // Refs for latest state to prevent race conditions during async Firestore edits & auto-likes sync
+  const year1ModulesRef = useRef<ModuleItem[]>(year1Modules);
+  const year2ModulesRef = useRef<ModuleItem[]>(year2Modules);
+  const adminNewsPostsRef = useRef<LessonItem[]>(adminNewsPosts);
+  const isMutatingLessonsRef = useRef<boolean>(false);
+  year1ModulesRef.current = year1Modules;
+  year2ModulesRef.current = year2Modules;
+  adminNewsPostsRef.current = adminNewsPosts;
 
   // Modals state for content creation
   const [isAddModuleModalOpen, setIsAddModuleModalOpen] = useState(false);
@@ -448,8 +526,10 @@ export default function App() {
   const [newLessonTitle, setNewLessonTitle] = useState('');
   const [newLessonType, setNewLessonType] = useState('');
   const [newLessonDescription, setNewLessonDescription] = useState('');
+  const [newLessonCommentsEnabled, setNewLessonCommentsEnabled] = useState(true);
   
   const [newLessonDate, setNewLessonDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [newLessonTime, setNewLessonTime] = useState(() => getTimeInputFromTimestamp(Date.now()));
   
   // Staged attachments & upload state for adding lessons
   const [stagedImages, setStagedImages] = useState<AttachedImage[]>([]);
@@ -461,18 +541,94 @@ export default function App() {
   const [lessonUploadError, setLessonUploadError] = useState<string | null>(null);
   const [moduleUploadError, setModuleUploadError] = useState<string | null>(null);
   const lessonTitleInputRef = useRef<HTMLInputElement>(null);
+  const addLessonDescRef = useRef<HTMLTextAreaElement>(null);
 
   // Edit Lesson state (Admin only)
   const [editingLesson, setEditingLesson] = useState<LessonItem | null>(null);
   const [editLessonTitle, setEditLessonTitle] = useState('');
   const [editLessonType, setEditLessonType] = useState('محاضرة');
   const [editLessonDescription, setEditLessonDescription] = useState('');
+  const [editLessonCommentsEnabled, setEditLessonCommentsEnabled] = useState(true);
   const [editLessonDate, setEditLessonDate] = useState('');
+  const [editLessonTime, setEditLessonTime] = useState('12:00');
   const [editStagedImages, setEditStagedImages] = useState<AttachedImage[]>([]);
   const [editStagedPdfs, setEditStagedPdfs] = useState<AttachedPdf[]>([]);
   const [isUploadingEditImages, setIsUploadingEditImages] = useState(false);
   const [isUploadingEditPdfs, setIsUploadingEditPdfs] = useState(false);
+  const [isSavingEditLesson, setIsSavingEditLesson] = useState(false);
   const [editLessonUploadError, setEditLessonUploadError] = useState<string | null>(null);
+  const editLessonTitleInputRef = useRef<HTMLInputElement>(null);
+  const editLessonDescRef = useRef<HTMLTextAreaElement>(null);
+
+  // Periodic Automated Like Growth Sync (every 15 seconds)
+  // Safely skipped while Admin is adding/editing/mutating lessons to guarantee zero race conditions!
+  useEffect(() => {
+    const syncAutomatedLikes = () => {
+      if (isMutatingLessonsRef.current || isAddLessonModalOpen || Boolean(editingLesson)) {
+        return;
+      }
+      const now = Date.now();
+
+      // Check year1 modules
+      const prevY1 = year1ModulesRef.current;
+      let y1Changed = false;
+      const nextY1 = prevY1.map(mod => {
+        const { updatedLessons, hasChanges } = applyAutomatedLikesToLessons(mod.lessons || [], now);
+        if (hasChanges) {
+          y1Changed = true;
+          updateModuleLessonsInFirestore('first', mod.id, updatedLessons).catch(() => {});
+          updatedLessons.forEach((l, idx) => {
+            if (l.likesCount !== (mod.lessons || [])[idx]?.likesCount) {
+              syncLessonLikesToShard(l).catch(() => {});
+            }
+          });
+          return { ...mod, lessons: updatedLessons };
+        }
+        return mod;
+      });
+      if (y1Changed) setYear1Modules(nextY1);
+
+      // Check year2 modules
+      const prevY2 = year2ModulesRef.current;
+      let y2Changed = false;
+      const nextY2 = prevY2.map(mod => {
+        const { updatedLessons, hasChanges } = applyAutomatedLikesToLessons(mod.lessons || [], now);
+        if (hasChanges) {
+          y2Changed = true;
+          updateModuleLessonsInFirestore('second', mod.id, updatedLessons).catch(() => {});
+          updatedLessons.forEach((l, idx) => {
+            if (l.likesCount !== (mod.lessons || [])[idx]?.likesCount) {
+              syncLessonLikesToShard(l).catch(() => {});
+            }
+          });
+          return { ...mod, lessons: updatedLessons };
+        }
+        return mod;
+      });
+      if (y2Changed) setYear2Modules(nextY2);
+
+      // Check Admin News posts
+      const prevNews = adminNewsPostsRef.current;
+      const { updatedLessons: nextNews, hasChanges: newsChanged } = applyAutomatedLikesToLessons(prevNews || [], now);
+      if (newsChanged) {
+        setAdminNewsPosts(nextNews);
+        updateAdminNewsPostsInFirestore(nextNews).catch(() => {});
+        nextNews.forEach((l, idx) => {
+          if (l.likesCount !== prevNews[idx]?.likesCount) {
+            syncLessonLikesToShard(l).catch(() => {});
+          }
+        });
+      }
+    };
+
+    const timeoutId = setTimeout(syncAutomatedLikes, 3000);
+    const intervalId = setInterval(syncAutomatedLikes, 15000);
+
+    return () => {
+      clearTimeout(timeoutId);
+      clearInterval(intervalId);
+    };
+  }, [isAddLessonModalOpen, editingLesson]);
 
   // Search in module lessons
   const [lessonSearchQuery, setLessonSearchQuery] = useState('');
@@ -642,11 +798,13 @@ export default function App() {
     })
     .sort((a, b) => String(b.id).localeCompare(String(a.id)));
   const allModules = [...year1Modules, ...year2Modules];
-  const activeModule = !isNewsView
+  const activeModule = (!isNewsView && !isSubmissionsView)
     ? (allModules.find(m => String(m.id) === String(activeModuleId)) || null)
     : null;
-  const isResolvingDeepModule = Boolean(!isNewsView && activeModuleId && !activeModule && (!isYear1Loaded || !isYear2Loaded));
+  const isResolvingDeepModule = Boolean(!isNewsView && !isSubmissionsView && activeModuleId && !activeModule && (!isYear1Loaded || !isYear2Loaded));
   const activeSpecialization = specializations.find(s => s.id === selectedSpecializationId) || specializations[0] || { id: 'pep-arabe', name: 'PEP arabe' };
+  const unreadSubmissionsCount = studentSubmissions.filter(s => !s.isRead).length;
+  const isCurrentYearLoaded = selectedYear === 'first' ? isYear1Loaded : isYear2Loaded;
 
   // Clear invalid moduleId only after both Firestore years have finished loading
   useEffect(() => {
@@ -677,18 +835,20 @@ export default function App() {
         const mergedLesson: LessonItem = {
           ...l,
           userLikes: typeof shardState.userLikes === 'number' ? shardState.userLikes : l.userLikes,
+          manualLikesOffset: typeof shardState.manualLikesOffset === 'number' ? shardState.manualLikesOffset : l.manualLikesOffset,
           autoLikesEnabled: typeof shardState.autoLikesEnabled === 'boolean' ? shardState.autoLikesEnabled : l.autoLikesEnabled,
           frozenAutoLikes: typeof shardState.frozenAutoLikes === 'number' ? shardState.frozenAutoLikes : l.frozenAutoLikes,
           autoLikesResumedAt: typeof shardState.autoLikesResumedAt === 'number' ? shardState.autoLikesResumedAt : l.autoLikesResumedAt,
           likesServerShard: shardState.serverShard || l.likesServerShard,
         };
         const recalculated = calculateAutomatedLikes(mergedLesson, now);
-        const nextLikesCount = mergedLesson.autoLikesEnabled === false
+        const nextLikesCount = (mergedLesson.autoLikesEnabled === false || typeof mergedLesson.manualLikesOffset === 'number')
           ? recalculated
           : Math.max(shardState.likesCount ?? 0, recalculated);
 
         if (
           mergedLesson.userLikes !== l.userLikes ||
+          mergedLesson.manualLikesOffset !== l.manualLikesOffset ||
           mergedLesson.autoLikesEnabled !== l.autoLikesEnabled ||
           mergedLesson.frozenAutoLikes !== l.frozenAutoLikes ||
           nextLikesCount !== l.likesCount
@@ -737,6 +897,7 @@ export default function App() {
     setSelectedYear(year);
     setActiveModuleId(null);
     setIsNewsView(false);
+    setIsSubmissionsView(false);
     setLessonSearchQuery('');
   };
 
@@ -944,6 +1105,7 @@ export default function App() {
         ...l,
         moduleId: ADMIN_NEWS_MODULE_ID,
       }));
+      adminNewsPostsRef.current = taggedPosts;
       setAdminNewsPosts(taggedPosts);
       try {
         await updateAdminNewsPostsInFirestore(taggedPosts);
@@ -975,12 +1137,14 @@ export default function App() {
         return mod;
       });
 
-    // 2. Immediately update React state for responsive feedback
+    // 2. Immediately update React state and refs for responsive feedback
+    year1ModulesRef.current = updateModuleList(year1ModulesRef.current);
+    year2ModulesRef.current = updateModuleList(year2ModulesRef.current);
     setYear1Modules(prev => updateModuleList(prev));
     setYear2Modules(prev => updateModuleList(prev));
 
     // 3. Accurately identify which year collection the module belongs to
-    const targetYear = year1Modules.some(m => String(m.id) === targetIdStr) ? 'first' : 'second';
+    const targetYear = year1ModulesRef.current.some(m => String(m.id) === targetIdStr) ? 'first' : 'second';
 
     // 4. Sync directly to Firebase Firestore
     try {
@@ -1068,7 +1232,15 @@ export default function App() {
 
   // Open Add Post Modal (Module Lesson OR Admin News Post)
   const openAddPostModal = () => {
+    setNewLessonTitle('');
+    setNewLessonDescription('');
     setNewLessonType('');
+    setNewLessonCommentsEnabled(true);
+    setNewLessonDate(new Date().toISOString().split('T')[0]);
+    setNewLessonTime(getTimeInputFromTimestamp(Date.now()));
+    setStagedImages([]);
+    setStagedPdfs([]);
+    setCustomPdfCoverUrl('');
     setLessonUploadError(null);
     setNotifyStudentsOnPublish(false);
     setIsAddLessonModalOpen(true);
@@ -1156,9 +1328,12 @@ export default function App() {
       e.preventDefault();
       e.stopPropagation();
     }
-    if (!isAdmin || (!activeModuleId && !isNewsView)) return;
-    const trimmedTitle = newLessonTitle.trim();
+    if (!isAdmin || (!activeModuleId && !isNewsView) || isSubmittingLesson) return;
+
+    const rawTitle = lessonTitleInputRef.current?.value ?? newLessonTitle;
+    const trimmedTitle = rawTitle.trim();
     if (!trimmedTitle) return;
+
     const trimmedType = newLessonType.trim();
     if (!trimmedType) {
       setLessonUploadError(
@@ -1169,30 +1344,38 @@ export default function App() {
       return;
     }
 
+    const rawDescription = addLessonDescRef.current?.value ?? newLessonDescription;
+    const trimmedDescription = rawDescription.trim();
+
     setIsSubmittingLesson(true);
+    isMutatingLessonsRef.current = true;
 
     try {
       const targetIdStr = isNewsView ? ADMIN_NEWS_MODULE_ID : String(activeModuleId);
       const targetModule = !isNewsView
         ? (
-            year1Modules.find(m => String(m.id) === targetIdStr) ||
-            year2Modules.find(m => String(m.id) === targetIdStr) ||
+            year1ModulesRef.current.find(m => String(m.id) === targetIdStr) ||
+            year2ModulesRef.current.find(m => String(m.id) === targetIdStr) ||
             activeModule
           )
         : null;
 
       const existingLessons = isNewsView
-        ? adminNewsPosts
+        ? adminNewsPostsRef.current
         : ((targetModule && Array.isArray(targetModule.lessons))
             ? targetModule.lessons
             : activeModuleLessons);
 
-      // Exact publication timestamp: defaults to Date.now() so every new post starts at t = 0 with 0 likes
+      // Exact publication timestamp (date + time)
       const todayStr = new Date().toISOString().split('T')[0];
-      let chosenTimestamp = Date.now();
-      let chosenDateText = new Date().toLocaleDateString('ar-DZ');
-      if (newLessonDate && newLessonDate !== todayStr) {
-        const parsed = new Date(newLessonDate);
+      const nowMs = Date.now();
+      const currentTimeStr = getTimeInputFromTimestamp(nowMs);
+      let chosenTimestamp = nowMs;
+      let chosenDateText = new Date(nowMs).toLocaleDateString('ar-DZ');
+
+      if (newLessonDate && (newLessonDate !== todayStr || (newLessonTime && newLessonTime !== currentTimeStr))) {
+        const timePart = newLessonTime && /^\d{2}:\d{2}$/.test(newLessonTime) ? newLessonTime : currentTimeStr;
+        const parsed = new Date(`${newLessonDate}T${timePart}:00`);
         if (!isNaN(parsed.getTime())) {
           chosenTimestamp = parsed.getTime();
           chosenDateText = parsed.toLocaleDateString('ar-DZ');
@@ -1200,9 +1383,6 @@ export default function App() {
       }
 
       const tempLessonId = `${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-      // Strict Rule: Every newly created post MUST initialize with exactly 0 likes at t = 0
-      const initialLikes = 0;
-      // Distribute load equally (50% / 50%) across Likes Server 1 (clastyzoom-4badf) & Server 2 (clasty-zoom)
       const assignedShard = assignBalancedLikesShard(existingLessons.length);
 
       const newLesson: LessonItem = {
@@ -1210,16 +1390,17 @@ export default function App() {
         moduleId: targetIdStr,
         title: trimmedTitle,
         type: trimmedType,
-        description: newLessonDescription.trim(),
+        description: trimmedDescription,
         images: Array.isArray(stagedImages) ? [...stagedImages] : [],
         pdfs: Array.isArray(stagedPdfs) ? [...stagedPdfs] : [],
-        likesCount: initialLikes,
+        likesCount: 0,
         userLikes: 0,
         autoLikesEnabled: true,
         frozenAutoLikes: 0,
         likesServerShard: assignedShard,
         isLiked: false,
         isPinned: false,
+        commentsEnabled: newLessonCommentsEnabled,
         timestamp: chosenTimestamp,
         comments: [],
         createdAt: chosenDateText,
@@ -1227,7 +1408,6 @@ export default function App() {
 
       const updatedLessons = [newLesson, ...existingLessons];
 
-      // Update state and sync to primary Firestore + assigned Likes Shard Server
       await syncModuleLessons(updatedLessons, true);
       syncLessonLikesToShard(newLesson).catch(() => {});
 
@@ -1237,7 +1417,7 @@ export default function App() {
           id: tempLessonId,
           title: trimmedTitle,
           body:
-            newLessonDescription.trim() ||
+            trimmedDescription ||
             (isNewsView
               ? 'نُشر خبر جديد في قسم أخبار الإدارة'
               : `تم نشر ${newLesson.type} جديد في مقياس ${activeModule?.name || ''}`),
@@ -1250,10 +1430,12 @@ export default function App() {
         }).catch(() => {});
       }
 
-      // Clean up form state and close modal
+      // Clean up form state and close modal cleanly
       setNewLessonTitle('');
       setNewLessonDescription('');
+      setNewLessonCommentsEnabled(true);
       setNewLessonDate(new Date().toISOString().split('T')[0]);
+      setNewLessonTime(getTimeInputFromTimestamp(Date.now()));
       setStagedImages([]);
       setStagedPdfs([]);
       setCustomPdfCoverUrl('');
@@ -1271,6 +1453,7 @@ export default function App() {
       console.error('Error publishing lesson:', err);
       setLessonUploadError(err?.message || 'حدث خطأ أثناء حفظ ونشر المنشور، يرجى إعادة المحاولة');
     } finally {
+      isMutatingLessonsRef.current = false;
       setIsSubmittingLesson(false);
     }
   };
@@ -1307,25 +1490,98 @@ export default function App() {
     await syncModuleLessons(updatedLessons);
   };
 
+  // Toggle Comments ON/OFF Per Post (Admin only) without harming comment icon aesthetics
+  const handleToggleLessonComments = async (lessonId: string) => {
+    if (!isAdmin || (!activeModuleId && !isNewsView)) return;
+    const targetIdStr = String(lessonId);
+    let nextEnabled = true;
+
+    const updatedLessons = activeFeedLessons.map(l => {
+      if (String(l.id) === targetIdStr) {
+        nextEnabled = l.commentsEnabled === false;
+        return {
+          ...l,
+          commentsEnabled: nextEnabled,
+        };
+      }
+      return l;
+    });
+
+    await syncModuleLessons(updatedLessons);
+    if (commentsModalLesson && String(commentsModalLesson.id) === targetIdStr) {
+      const updated = updatedLessons.find(l => String(l.id) === targetIdStr);
+      if (updated) setCommentsModalLesson(updated);
+    }
+
+    setAdminSuccessNotification(
+      nextEnabled ? 'تم تشغيل التعليقات على هذا المنشور' : 'تم إيقاف التعليقات على هذا المنشور'
+    );
+    setTimeout(() => setAdminSuccessNotification(null), 3000);
+  };
+
+  // Admin Increment / Decrement Post Likes (+ / -)
+  const handleAdminAdjustLikes = async (lessonId: string, delta: number) => {
+    if (!isAdmin || (!activeModuleId && !isNewsView)) return;
+    const targetIdStr = String(lessonId);
+    const now = Date.now();
+    let updatedLessonRef: LessonItem | null = null;
+
+    const currentFeed = isNewsView
+      ? adminNewsPostsRef.current
+      : (
+          year1ModulesRef.current.find(m => String(m.id) === String(activeModuleId))?.lessons ||
+          year2ModulesRef.current.find(m => String(m.id) === String(activeModuleId))?.lessons ||
+          activeFeedLessons
+        );
+
+    const updatedLessons = currentFeed.map(l => {
+      if (String(l.id) === targetIdStr) {
+        const currentDisplayed = typeof l.likesCount === 'number' ? l.likesCount : 0;
+        const targetLikes = Math.max(0, currentDisplayed + delta);
+        const currentAuto = getSimulatedAutoLikesOnly(l, now);
+        const currentReal = typeof l.userLikes === 'number' ? Math.max(0, l.userLikes) : (l.isLiked ? 1 : 0);
+        const nextManualOffset = targetLikes - (currentAuto + currentReal);
+
+        updatedLessonRef = {
+          ...l,
+          manualLikesOffset: nextManualOffset,
+          likesCount: targetLikes,
+        };
+        return updatedLessonRef;
+      }
+      return l;
+    });
+
+    await syncModuleLessons(updatedLessons);
+    if (updatedLessonRef) {
+      syncLessonLikesToShard(updatedLessonRef).catch(() => {});
+    }
+  };
+
   // OPEN EDIT LESSON MODAL (Admin only)
   const handleOpenEditLesson = (lesson: LessonItem) => {
     if (!isAdmin) return;
     setEditingLesson(lesson);
-    setEditLessonTitle(lesson.title);
+    setEditLessonTitle(lesson.title || '');
     setEditLessonType(lesson.type || 'محاضرة');
     setEditLessonDescription(lesson.description || '');
+    setEditLessonCommentsEnabled(lesson.commentsEnabled !== false);
     setEditStagedImages([...(lesson.images || [])]);
     setEditStagedPdfs([...(lesson.pdfs || [])]);
+    setEditLessonUploadError(null);
 
-    // Pre-fill date picker with post publication date
+    // Pre-fill date & time pickers with post publication date/time
     if (lesson.timestamp && !isNaN(lesson.timestamp)) {
       try {
         setEditLessonDate(new Date(lesson.timestamp).toISOString().split('T')[0]);
+        setEditLessonTime(getTimeInputFromTimestamp(lesson.timestamp));
       } catch {
         setEditLessonDate(new Date().toISOString().split('T')[0]);
+        setEditLessonTime(getTimeInputFromTimestamp(Date.now()));
       }
     } else {
       setEditLessonDate(new Date().toISOString().split('T')[0]);
+      setEditLessonTime(getTimeInputFromTimestamp(Date.now()));
     }
   };
 
@@ -1403,18 +1659,28 @@ export default function App() {
   // SAVE EDITED LESSON / NEWS POST (Admin only)
   const handleSaveEditedLesson = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingLesson || (!activeModuleId && !isNewsView)) return;
-    const trimmedTitle = editLessonTitle.trim();
+    if (!editingLesson || (!activeModuleId && !isNewsView) || isSavingEditLesson) return;
+
+    const rawTitle = editLessonTitleInputRef.current?.value ?? editLessonTitle;
+    const trimmedTitle = rawTitle.trim();
     if (!trimmedTitle) return;
+
+    const rawDescription = editLessonDescRef.current?.value ?? editLessonDescription;
+    const trimmedDescription = rawDescription.trim();
+
+    setIsSavingEditLesson(true);
+    isMutatingLessonsRef.current = true;
 
     const originalDateStr =
       editingLesson.timestamp && !isNaN(editingLesson.timestamp)
         ? new Date(editingLesson.timestamp).toISOString().split('T')[0]
         : '';
+    const originalTimeStr = getTimeInputFromTimestamp(editingLesson.timestamp);
     let chosenTimestamp = editingLesson.timestamp || Date.now();
     let chosenDateText = editingLesson.createdAt;
-    if (editLessonDate && editLessonDate !== originalDateStr) {
-      const parsed = new Date(editLessonDate);
+    if (editLessonDate && (editLessonDate !== originalDateStr || (editLessonTime && editLessonTime !== originalTimeStr))) {
+      const timePart = editLessonTime && /^\d{2}:\d{2}$/.test(editLessonTime) ? editLessonTime : originalTimeStr;
+      const parsed = new Date(`${editLessonDate}T${timePart}:00`);
       if (!isNaN(parsed.getTime())) {
         chosenTimestamp = parsed.getTime();
         chosenDateText = parsed.toLocaleDateString('ar-DZ');
@@ -1422,13 +1688,22 @@ export default function App() {
     }
 
     const editIdStr = String(editingLesson.id);
-    const updatedLessons = activeFeedLessons.map(l => {
+    const latestFeed = isNewsView
+      ? adminNewsPostsRef.current
+      : (
+          year1ModulesRef.current.find(m => String(m.id) === String(activeModuleId))?.lessons ||
+          year2ModulesRef.current.find(m => String(m.id) === String(activeModuleId))?.lessons ||
+          activeFeedLessons
+        );
+
+    const updatedLessons = latestFeed.map(l => {
       if (String(l.id) === editIdStr) {
         return {
           ...l,
           title: trimmedTitle,
           type: editLessonType,
-          description: editLessonDescription.trim(),
+          description: trimmedDescription,
+          commentsEnabled: editLessonCommentsEnabled,
           images: editStagedImages,
           pdfs: editStagedPdfs,
           createdAt: chosenDateText,
@@ -1445,7 +1720,7 @@ export default function App() {
           id: editIdStr,
           title: trimmedTitle,
           body:
-            editLessonDescription.trim() ||
+            trimmedDescription ||
             (isNewsView
               ? 'نُشر خبر جديد في قسم أخبار الإدارة'
               : `تم نشر ${editLessonType || 'درس'} في مقياس ${activeModule?.name || ''}`),
@@ -1457,13 +1732,146 @@ export default function App() {
           createdAt: activeStudentNotif?.createdAt || Date.now(),
         }).catch(() => {});
       }
+      if (commentsModalLesson && String(commentsModalLesson.id) === editIdStr) {
+        const updated = updatedLessons.find(l => String(l.id) === editIdStr);
+        if (updated) setCommentsModalLesson(updated);
+      }
       setEditLessonUploadError(null);
+      setEditLessonDescription('');
       setEditingLesson(null);
-      setAdminSuccessNotification('تم تعديل وحفظ بيانات المنشور وتاريخ النشر بنجاح');
+      setAdminSuccessNotification('تم تعديل وحفظ بيانات المنشور بنجاح');
       setTimeout(() => setAdminSuccessNotification(null), 3000);
     } catch (err: any) {
       setEditLessonUploadError(err?.message || 'حدث خطأ أثناء حفظ التعديلات، يرجى إعادة المحاولة');
+    } finally {
+      isMutatingLessonsRef.current = false;
+      setIsSavingEditLesson(false);
     }
+  };
+
+  // Student Submission Upload & Submit Handlers
+  const handleSubImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    setIsUploadingSubImages(true);
+    setSubFormError(null);
+    try {
+      for (const file of files) {
+        try {
+          const imgUrl = await uploadImageToImgBB(file);
+          if (imgUrl) {
+            setSubImages(prev => [
+              ...prev,
+              { id: `${Date.now()}-${Math.random()}`, url: imgUrl, name: file.name || 'image.jpg' },
+            ]);
+          }
+        } catch (err: any) {
+          setSubFormError(err?.message || `فشل رفع الصورة (${file.name})`);
+        }
+      }
+    } finally {
+      setIsUploadingSubImages(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleSubPdfFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    setIsUploadingSubPdfs(true);
+    setSubFormError(null);
+    try {
+      for (const file of files) {
+        const sizeStr = file.size > 1024 * 1024
+          ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
+          : `${Math.round(file.size / 1024)} KB`;
+        try {
+          const uploadResult = await uploadPdfToCatbox(file);
+          setSubPdfs(prev => [
+            ...prev,
+            {
+              id: `${Date.now()}-${Math.random()}`,
+              name: file.name || 'document.pdf',
+              size: sizeStr,
+              url: uploadResult.downloadUrl,
+              downloadUrl: uploadResult.downloadUrl,
+              viewUrl: uploadResult.viewUrl,
+            },
+          ]);
+        } catch (err: any) {
+          setSubFormError(err?.message || `فشل رفع ملف PDF (${file.name})`);
+        }
+      }
+    } finally {
+      setIsUploadingSubPdfs(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleSubmitStudentContent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmittingStudentContent) return;
+
+    const trimmedTitle = subTitle.trim();
+    if (!trimmedTitle) {
+      setSubFormError('يرجى كتابة عنوان الدرس أو المحتوى أولاً');
+      return;
+    }
+
+    const rawSubDesc = subDescRef.current?.value ?? subDescription;
+    setIsSubmittingStudentContent(true);
+    setSubFormError(null);
+    setSubFormSuccess(null);
+
+    try {
+      const nowMs = Date.now();
+      const submission: StudentSubmissionItem = {
+        id: `sub_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
+        senderName: subSenderName.trim() || `طالب #${getSessionAnonId()}`,
+        yearLabel: subYearLabel.trim() || 'عام',
+        moduleName: subModuleName.trim() || 'غير محدد',
+        title: trimmedTitle,
+        description: rawSubDesc.trim(),
+        images: [...subImages],
+        pdfs: [...subPdfs],
+        isRead: false,
+        createdAt: new Date(nowMs).toLocaleDateString('ar-DZ'),
+        timestamp: nowMs,
+      };
+
+      await addStudentSubmissionToFirestore(submission);
+      setSubTitle('');
+      setSubDescription('');
+      setSubModuleName('');
+      setSubImages([]);
+      setSubPdfs([]);
+      setSubFormSuccess('تم إرسال المحتوى إلى المدير بنجاح! سيطّلع عليه فور دخوله.');
+      setTimeout(() => setSubFormSuccess(null), 6000);
+    } catch (err: any) {
+      setSubFormError(err?.message || 'حدث خطأ أثناء إرسال المحتوى، يرجى المحاولة مرة أخرى');
+    } finally {
+      setIsSubmittingStudentContent(false);
+    }
+  };
+
+  const handleToggleSubmissionRead = async (sub: StudentSubmissionItem) => {
+    if (!isAdmin) return;
+    try {
+      await markStudentSubmissionReadInFirestore(sub.id, !sub.isRead);
+    } catch {}
+  };
+
+  const handleDeleteSubmission = async (subId: string) => {
+    if (!isAdmin) return;
+    try {
+      await deleteStudentSubmissionFromFirestore(subId);
+      setAdminSuccessNotification('تم حذف الرسالة بنجاح');
+      setTimeout(() => setAdminSuccessNotification(null), 2500);
+    } catch {}
   };
 
   // Admin Control: Pause or Resume Automated Generated Likes (Real user likes always keep working)
@@ -1545,7 +1953,7 @@ export default function App() {
         const computedTotal = currentAutoLikes + nextUserLikes;
         const previousLikes = typeof l.likesCount === 'number' ? l.likesCount : 0;
 
-        const newLikesCount = l.autoLikesEnabled === false
+        const newLikesCount = (l.autoLikesEnabled === false || typeof l.manualLikesOffset === 'number')
           ? Math.max(nextUserLikes, computedTotal)
           : (nextLiked ? Math.max(previousLikes + 1, computedTotal) : Math.max(0, previousLikes - 1));
 
@@ -1579,6 +1987,11 @@ export default function App() {
     if (!commentText || (!activeModuleId && !isNewsView)) return;
 
     const targetIdStr = String(lessonId);
+    const targetLesson = activeFeedLessons.find(l => String(l.id) === targetIdStr);
+    if (!isAdmin && targetLesson?.commentsEnabled === false) {
+      return;
+    }
+
     const newComment: CommentItem = {
       id: `${Date.now()}-${Math.random()}`,
       author: isAdmin ? 'KAOUANE fares' : `مجهول الهوية #${getSessionAnonId()}`,
@@ -1664,7 +2077,7 @@ export default function App() {
     }
   };
 
-  // Download Trigger Utility (Supports both direct URLs and Firestore Cloud Media URLs)
+  // Download Trigger Utility (Supports regular browsers AND Telegram In-App Browser reliably)
   const triggerDownload = async (url?: string, filename = 'document.pdf') => {
     if (!url || url === '#') {
       const blob = new Blob([`ENS Medea Document: ${filename}`], { type: 'application/pdf' });
@@ -1680,6 +2093,60 @@ export default function App() {
     }
 
     try {
+      const isPdf = filename.toLowerCase().endsWith('.pdf') || url.toLowerCase().includes('.pdf');
+
+      // Special robust handling for Telegram In-App WebView (blocks blob: downloads!)
+      if (isTelegramBrowser) {
+        if (isFirestoreMediaUrl(url)) {
+          setAdminSuccessNotification('جاري تحضير الملف للتحميل...');
+          setTimeout(() => setAdminSuccessNotification(null), 2500);
+          const dataUrl = await resolveMediaDataUrl(url);
+          const a = document.createElement('a');
+          a.href = dataUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTelegramDownloadFallback({ filename, dataUrl, isPdf });
+          return;
+        }
+
+        // Direct HTTP/HTTPS URL inside Telegram WebView: use native external/Chrome intent or direct link fallback
+        const externalLink = getExternalBrowserHref(url);
+        const a = document.createElement('a');
+        a.href = externalLink;
+        if (externalLink === url) {
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+        }
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTelegramDownloadFallback({ filename, directUrl: url, isPdf });
+        return;
+      }
+
+      // Standard browsers: fetch HTTP files into a local Blob when CORS permits so `download={filename}` forces direct download
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        try {
+          const resp = await fetch(url, { mode: 'cors' });
+          if (resp.ok) {
+            const blob = await resp.blob();
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+            return;
+          }
+        } catch {
+          // Fallback to direct anchor if remote server restricts CORS
+        }
+      }
+
       const finalUrl = await resolveMediaUrl(url);
       const a = document.createElement('a');
       a.href = finalUrl;
@@ -1800,9 +2267,9 @@ export default function App() {
                 src={logoAsset} 
                 alt="ENS Medea Logo" 
                 className={`h-[52px] sm:h-[62px] md:h-[66px] w-auto ${
-                  isAdmin && (activeModule || isNewsView)
-                    ? 'max-w-[110px] sm:max-w-none'
-                    : 'max-w-[175px] sm:max-w-none'
+                  isAdmin && (activeModule || isNewsView || isSubmissionsView)
+                    ? 'max-w-[100px] sm:max-w-none'
+                    : 'max-w-[140px] sm:max-w-none'
                 } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = NEW_LOGO_URL;
@@ -1811,12 +2278,42 @@ export default function App() {
             </div>
           </div>
 
-          {/* Far Right Side: Home (Toggle News / Modules), Search, Back Button & Admin Actions */}
+          {/* Far Right Side: Send-to-Admin (Black Cube w/ White Icon), Home, Search, Back & Admin Actions */}
           <div className="flex items-center gap-1 sm:gap-2 min-w-0 justify-end" dir="rtl">
+            {/* Send Lesson/Content to Admin Button: Same colors as Home & Search (black icon on white cube by default, inverting when active) */}
+            <button
+              type="button"
+              onClick={() => {
+                if (isSubmissionsView) {
+                  setIsSubmissionsView(false);
+                } else {
+                  setIsSubmissionsView(true);
+                  setIsNewsView(false);
+                  setActiveModuleId(null);
+                  setLessonSearchQuery('');
+                }
+              }}
+              className={`relative w-10 h-10 sm:w-11 sm:h-11 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border focus:outline-none ${
+                isSubmissionsView
+                  ? 'bg-black text-white border-black shadow-xs'
+                  : 'bg-white text-black hover:bg-neutral-100 border-neutral-200 shadow-2xs'
+              }`}
+              title={isAdmin ? 'رسائل ومحتويات الطلبة المرسلة' : 'إرسال درس أو محتوى للمدير'}
+              aria-label={isAdmin ? 'رسائل الطلبة' : 'إرسال للمدير'}
+            >
+              <Send className="w-6 h-6 sm:w-7 sm:h-7 stroke-[2.2] -rotate-45" />
+              {isAdmin && unreadSubmissionsCount > 0 && (
+                <span className="absolute -top-1.5 -left-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold font-mono flex items-center justify-center border-2 border-white shadow-xs">
+                  {unreadSubmissionsCount}
+                </span>
+              )}
+            </button>
+
             {/* Home Icon Button: Toggles between Admin News Feed and Modules & Year List */}
             <button
               type="button"
               onClick={() => {
+                setIsSubmissionsView(false);
                 if (isNewsView) {
                   setIsNewsView(false);
                   setActiveModuleId(null);
@@ -1902,13 +2399,14 @@ export default function App() {
               </>
             )}
 
-            {/* Return / Back Button: Placed on the far right when in active module or Admin News view */}
-            {(activeModule || isNewsView) && (
+            {/* Return / Back Button: Placed on the far right when in active module, News view, or Submissions view */}
+            {(activeModule || isNewsView || isSubmissionsView) && (
               <button
                 type="button"
                 onClick={() => {
                   setActiveModuleId(null);
                   setIsNewsView(false);
+                  setIsSubmissionsView(false);
                   setLessonSearchQuery('');
                   setLessonTypeFilter('all');
                   setNewsTypeFilter('all');
@@ -1937,8 +2435,67 @@ export default function App() {
         </div>
       </header>
 
+      {/* Telegram In-App Browser External Redirect & Download Warning Banner */}
+      {isTelegramBrowser && !telegramBannerDismissed && (
+        <div className="w-full max-w-7xl mx-auto px-2 sm:px-4 md:px-6 mt-3" dir="rtl">
+          <div className="p-3 sm:p-4 bg-black text-white rounded-2xl border border-neutral-800 shadow-md flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-white text-black flex items-center justify-center shrink-0 mt-0.5">
+                <ExternalLink className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-bold text-white leading-snug">
+                  أنت تتصفح من داخل متصفح تلغرام
+                </p>
+                <p className="text-[11px] text-neutral-300 mt-0.5 leading-relaxed">
+                  لتحميل الملفات والصور بسلاسة، افتح المنصة في المتصفح الخارجي (Chrome / Safari) أو اضغط النقاط الثلاث (⋮) ثم &quot;فتح في المتصفح&quot;.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end">
+              <a
+                href={typeof window !== 'undefined' ? getExternalBrowserHref(window.location.href) : '#'}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-neutral-200 text-black rounded-xl text-xs font-bold transition-colors shadow-xs"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>فتح في المتصفح الخارجي</span>
+              </a>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof window !== 'undefined') {
+                    navigator.clipboard.writeText(window.location.href).then(() => {
+                      setAdminSuccessNotification('تم نسخ الرابط، يمكنك لصقه في المتصفح الخارجي');
+                      setTimeout(() => setAdminSuccessNotification(null), 3000);
+                    }).catch(() => {});
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl text-xs font-medium border border-neutral-700 transition-colors cursor-pointer"
+                title="نسخ الرابط"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>نسخ</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setTelegramBannerDismissed(true)}
+                className="p-1.5 text-neutral-400 hover:text-white rounded-lg cursor-pointer"
+                title="إغلاق التنبيه"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Top Search Bar (Toggled when user clicks the search icon in header) */}
-      {isSearchVisible && (
+      {isSearchVisible && !isSubmissionsView && (
         <div className="w-full max-w-xl mx-auto px-4 mt-3 mb-1 animate-in fade-in slide-in-from-top-2 duration-200" dir="rtl">
           <div className="relative flex items-center">
             <input
@@ -2039,8 +2596,8 @@ export default function App() {
           </div>
         )}
 
-        {/* VIEW 1: MODULES GRID (when no module is opened and not on News view) */}
-        {!activeModule && !isNewsView && !isResolvingDeepModule && (
+        {/* VIEW 1: MODULES GRID (when no module is opened, not on News view, and not on Submissions view) */}
+        {!activeModule && !isNewsView && !isSubmissionsView && !isResolvingDeepModule && (
           <div className="space-y-8 animate-in fade-in duration-150">
             
             {/* Year Selection Tabs (Responsive across all screen sizes) */}
@@ -2145,8 +2702,16 @@ export default function App() {
               </div>
             )}
 
-            {/* Empty State vs Modules Grid */}
-            {currentModules.length === 0 ? (
+            {/* Loading vs Empty State vs Modules Grid */}
+            {!isCurrentYearLoaded && currentModules.length === 0 ? (
+              <div className="w-full py-20 bg-neutral-50 rounded-3xl border border-neutral-200 flex flex-col items-center justify-center gap-3.5 text-center p-6">
+                <Loader2 className="w-8 h-8 animate-spin text-black" />
+                <div className="space-y-1">
+                  <p className="text-sm font-bold text-black">جاري تحميل المقاييس، يرجى الانتظار...</p>
+                  <p className="text-xs text-neutral-500">يتم جلب المقاييس والموارد من السحابة</p>
+                </div>
+              </div>
+            ) : currentModules.length === 0 ? (
               <div className="space-y-6">
                 <div 
                   onClick={() => {
@@ -2293,8 +2858,391 @@ export default function App() {
           </div>
         )}
 
+        {/* VIEW 3: STUDENT SUBMISSIONS TO ADMIN (Send icon view) */}
+        {isSubmissionsView && (
+          <div className="w-full max-w-3xl mx-auto space-y-6 animate-in fade-in duration-150" dir="rtl">
+            {isAdmin ? (
+              /* ADMIN INBOX VIEW: View all student-submitted lessons & content */
+              <div className="space-y-5">
+                <div className="bg-white rounded-3xl border border-neutral-200 p-5 sm:p-6 shadow-2xs flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-black text-white flex items-center justify-center shrink-0">
+                      <Inbox className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-base sm:text-lg font-bold text-black">
+                        المحتويات والدروس المرسلة من الطلبة
+                      </h2>
+                      <p className="text-xs text-neutral-500 mt-0.5">
+                        {studentSubmissions.length > 0
+                          ? `إجمالي الرسائل: ${studentSubmissions.length} · غير مقروءة: ${unreadSubmissionsCount}`
+                          : 'تصلك هنا كل الدروس والملفات التي يرسلها الطلبة والمستخدمون'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsSubmissionsView(false)}
+                    className="px-3.5 py-2 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-black text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    العودة للمقاييس
+                  </button>
+                </div>
+
+                {!isSubmissionsLoaded && studentSubmissions.length === 0 ? (
+                  <div className="w-full py-20 bg-neutral-50 rounded-3xl border border-neutral-200 flex flex-col items-center justify-center gap-3 text-center">
+                    <Loader2 className="w-8 h-8 animate-spin text-black" />
+                    <p className="text-xs font-semibold text-neutral-600">جاري تحميل رسائل الطلبة...</p>
+                  </div>
+                ) : studentSubmissions.length === 0 ? (
+                  <div className="w-full py-20 bg-neutral-50 rounded-3xl border border-dashed border-neutral-300 flex flex-col items-center justify-center gap-2 text-center p-6">
+                    <Inbox className="w-9 h-9 text-neutral-400" />
+                    <p className="text-sm font-bold text-black">لا توجد محتويات مرسلة من الطلبة بعد</p>
+                    <p className="text-xs text-neutral-500">عند قيام أي طالب أو مستخدم بإرسال درس أو ملف سيظهر لك هنا فوراً.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {studentSubmissions.map((sub) => (
+                      <article
+                        key={sub.id}
+                        className={`bg-white rounded-3xl border p-4 sm:p-6 shadow-2xs space-y-4 transition-all ${
+                          sub.isRead ? 'border-neutral-200' : 'border-black ring-1 ring-black/10'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-neutral-100 pb-3">
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center flex-wrap gap-2">
+                              <span className="text-sm font-bold text-black">{sub.senderName}</span>
+                              {!sub.isRead && (
+                                <span className="px-2 py-0.5 rounded-lg bg-black text-white text-[10px] font-bold">
+                                  جديد
+                                </span>
+                              )}
+                              <span className="px-2 py-0.5 rounded-lg bg-neutral-100 text-neutral-700 text-[11px] font-semibold border border-neutral-200">
+                                {sub.yearLabel}
+                              </span>
+                              {sub.moduleName && (
+                                <span className="px-2 py-0.5 rounded-lg bg-neutral-100 text-neutral-700 text-[11px] font-semibold border border-neutral-200">
+                                  {sub.moduleName}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-neutral-500 font-mono flex items-center gap-1.5">
+                              <span>{sub.createdAt}</span>
+                              {formatPostTime(sub.timestamp) && (
+                                <>
+                                  <span>·</span>
+                                  <span dir="ltr">{formatPostTime(sub.timestamp)}</span>
+                                </>
+                              )}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleSubmissionRead(sub)}
+                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-colors cursor-pointer ${
+                                sub.isRead
+                                  ? 'bg-neutral-100 text-neutral-600 border-neutral-200 hover:bg-neutral-200'
+                                  : 'bg-black text-white border-black hover:bg-neutral-800'
+                              }`}
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>{sub.isRead ? 'مقروءة' : 'تمت القراءة'}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSubmission(sub.id)}
+                              className="p-2 rounded-xl text-neutral-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                              title="حذف الرسالة"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <h3 className="text-base font-bold text-black">{sub.title}</h3>
+                          {sub.description && (
+                            <p className="text-sm text-neutral-700 leading-relaxed whitespace-pre-line">
+                              {sub.description}
+                            </p>
+                          )}
+                        </div>
+
+                        {sub.images && sub.images.length > 0 && (
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                            {sub.images.map((img, idx) => (
+                              <div
+                                key={img.id}
+                                onClick={() => handleOpenLightbox(sub.images, idx)}
+                                className="relative aspect-4/3 rounded-2xl overflow-hidden border border-neutral-200 bg-neutral-100 cursor-pointer group"
+                              >
+                                <CloudImage
+                                  src={img.url}
+                                  alt={img.name}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {sub.pdfs && sub.pdfs.length > 0 && (
+                          <div className="space-y-2">
+                            {sub.pdfs.map((pdf) => (
+                              <div
+                                key={pdf.id}
+                                className="flex items-center justify-between p-3 bg-neutral-50 rounded-2xl border border-neutral-200 gap-2"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                  <div className="w-9 h-9 rounded-xl bg-neutral-200 text-black flex items-center justify-center shrink-0">
+                                    <FileText className="w-4 h-4" />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="text-xs font-bold text-black truncate font-mono">{pdf.name}</p>
+                                    <p className="text-[11px] text-neutral-500 font-mono">{pdf.size} · PDF</p>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => triggerDownload(pdf.url, pdf.name)}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-neutral-200 text-black text-xs font-semibold rounded-xl border border-neutral-300 cursor-pointer shrink-0"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  <span>تحميل</span>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* STUDENT / VISITOR SUBMISSION FORM */
+              <div className="bg-white rounded-3xl border border-neutral-200 p-5 sm:p-7 shadow-2xs space-y-5">
+                <div className="flex items-center gap-3 pb-4 border-b border-neutral-200">
+                  <div className="w-11 h-11 rounded-2xl bg-black text-white flex items-center justify-center shrink-0">
+                    <Send className="w-5 h-5 text-white -rotate-45" />
+                  </div>
+                  <div>
+                    <h2 className="text-base sm:text-lg font-bold text-black">
+                      إرسال دروس أو محتويات إلى المدير
+                    </h2>
+                    <p className="text-xs text-neutral-500 mt-0.5">
+                      يمكن للطلبة والمستخدمين إرسال ملخصات، دروس، صور أو ملفات PDF ليراجعها المدير وينشرها.
+                    </p>
+                  </div>
+                </div>
+
+                {subFormSuccess && (
+                  <div className="p-4 bg-black text-white rounded-2xl text-xs sm:text-sm font-semibold flex items-center gap-2.5 animate-in fade-in">
+                    <CheckCircle2 className="w-5 h-5 text-white shrink-0" />
+                    <span>{subFormSuccess}</span>
+                  </div>
+                )}
+
+                {subFormError && (
+                  <div className="p-3.5 bg-red-50 border border-red-200 text-red-700 rounded-2xl text-xs font-semibold">
+                    {subFormError}
+                  </div>
+                )}
+
+                <form onSubmit={handleSubmitStudentContent} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                        اسمك (اختياري):
+                      </label>
+                      <input
+                        type="text"
+                        value={subSenderName}
+                        onChange={(e) => setSubSenderName(e.target.value)}
+                        placeholder="مثال: طالب سنة ثانية / اسمك..."
+                        className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                        السنة الدراسية:
+                      </label>
+                      <select
+                        value={subYearLabel}
+                        onChange={(e) => setSubYearLabel(e.target.value)}
+                        className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                      >
+                        <option value="السنة الثانية">السنة الثانية</option>
+                        <option value="السنة الأولى">السنة الأولى</option>
+                        <option value="عام / أخبار">عام / أخبار</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                      اسم المقياس (اختياري):
+                    </label>
+                    <input
+                      type="text"
+                      value={subModuleName}
+                      onChange={(e) => setSubModuleName(e.target.value)}
+                      placeholder="اكتب اسم المقياس (مثل: ديداكتيك، بيداغوجيا...)"
+                      className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                      عنوان الدرس أو المحتوى (مطلوب):
+                    </label>
+                    <input
+                      type="text"
+                      value={subTitle}
+                      onChange={(e) => setSubTitle(e.target.value)}
+                      required
+                      placeholder="مثال: ملخص المحاضرة الثالثة، سلسلة تمارين TD..."
+                      className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                      المحتوى أو الملاحظات الموجهة للمدير:
+                    </label>
+                    <textarea
+                      ref={subDescRef}
+                      value={subDescription}
+                      onChange={(e) => setSubDescription(e.target.value)}
+                      rows={4}
+                      placeholder="اكتب نص الدرس أو أي توضيح تود إيصاله للمدير..."
+                      className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white resize-y"
+                    />
+                  </div>
+
+                  {/* Attach Images */}
+                  <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs font-bold text-black">
+                        <ImageIcon className="w-4 h-4 text-black" />
+                        <span>إرفاق صور ({subImages.length})</span>
+                      </div>
+                      <label className="flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-xl text-xs font-semibold text-black cursor-pointer transition-colors shadow-2xs">
+                        {isUploadingSubImages ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-black" />
+                        ) : (
+                          <Upload className="w-3.5 h-3.5 text-black" />
+                        )}
+                        <span>{isUploadingSubImages ? 'جاري رفع الصور...' : 'اختيار صور'}</span>
+                        <input
+                          type="file"
+                          multiple
+                          accept="image/*"
+                          onChange={handleSubImageFileChange}
+                          disabled={isUploadingSubImages}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {subImages.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {subImages.map((img) => (
+                          <div key={img.id} className="relative w-16 h-16 rounded-xl overflow-hidden border border-neutral-300 group">
+                            <CloudImage src={img.url} alt={img.name} className="w-full h-full object-cover" />
+                            <button
+                              type="button"
+                              onClick={() => setSubImages(prev => prev.filter(item => item.id !== img.id))}
+                              className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Attach PDFs */}
+                  <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs font-bold text-black">
+                        <FileUp className="w-4 h-4 text-black" />
+                        <span>إرفاق ملفات PDF ({subPdfs.length})</span>
+                      </div>
+                      <label className="flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-xl text-xs font-semibold text-black cursor-pointer transition-colors shadow-2xs">
+                        {isUploadingSubPdfs ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-black" />
+                        ) : (
+                          <Upload className="w-3.5 h-3.5 text-black" />
+                        )}
+                        <span>{isUploadingSubPdfs ? 'جاري رفع PDF...' : 'اختيار ملف PDF'}</span>
+                        <input
+                          type="file"
+                          multiple
+                          accept="application/pdf,.pdf"
+                          onChange={handleSubPdfFileChange}
+                          disabled={isUploadingSubPdfs}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {subPdfs.length > 0 && (
+                      <div className="space-y-2">
+                        {subPdfs.map((pdf) => (
+                          <div key={pdf.id} className="flex items-center justify-between p-2.5 bg-white rounded-xl border border-neutral-200 text-xs">
+                            <div className="flex items-center gap-2 truncate">
+                              <FileText className="w-4 h-4 text-black shrink-0" />
+                              <span className="font-mono text-black truncate">{pdf.name}</span>
+                              <span className="text-neutral-400 text-[10px]">({pdf.size})</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setSubPdfs(prev => prev.filter(item => item.id !== pdf.id))}
+                              className="text-neutral-400 hover:text-black p-1"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-end gap-3 pt-2">
+                    <button
+                      type="submit"
+                      disabled={!subTitle.trim() || isUploadingSubImages || isUploadingSubPdfs || isSubmittingStudentContent}
+                      className="w-full sm:w-auto px-6 py-3 rounded-2xl text-xs sm:text-sm font-bold text-white bg-black hover:bg-neutral-800 disabled:opacity-40 transition-colors shadow-xs flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isSubmittingStudentContent ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-white" />
+                          <span>جاري الإرسال إلى المدير...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-4 h-4 text-white -rotate-45" />
+                          <span>إرسال المحتوى للمدير</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* 4. VIEW 2: DEDICATED MODULE PAGE OR ADMIN NEWS & UPDATES FEED */}
-        {(activeModule || isNewsView) && (
+        {(activeModule || isNewsView) && !isSubmissionsView && (
           <div className="w-full max-w-5xl mx-auto space-y-5 sm:space-y-6 px-0.5 sm:px-2 animate-in fade-in duration-150">
             
             {/* Filter Bar: Scrolls naturally with the page without layout jumps */}
@@ -2446,7 +3394,12 @@ export default function App() {
             {/* 4. EXPANDED FULL-WIDTH INSTAGRAM-STYLE POSTS FEED */}
             <div className="space-y-7">
               
-              {sortedLessons.length === 0 ? (
+              {isNewsView && !isNewsLoaded && sortedLessons.length === 0 ? (
+                <div className="w-full py-20 bg-neutral-50 rounded-3xl border border-neutral-200 flex flex-col items-center justify-center gap-3 text-center p-6">
+                  <Loader2 className="w-8 h-8 animate-spin text-black" />
+                  <p className="text-sm font-bold text-black">جاري تحميل الأخبار والمستجدات، يرجى الانتظار...</p>
+                </div>
+              ) : sortedLessons.length === 0 ? (
                 /* Empty feed container */
                 <div 
                   onClick={() => {
@@ -2541,23 +3494,26 @@ export default function App() {
                               </span>
                             </div>
 
-                            {/* 2. Date Behavior for Pinned Posts:
-                                When pinned: HIDE publication date completely (show only lesson type).
-                                When unpinned: restore and show publication date normally.
-                            */}
-                            <div className="flex items-center gap-2 text-xs text-neutral-500 font-mono mt-0.5">
+                            {/* 2. Date & Time Behavior for Pinned Posts */}
+                            <div className="flex items-center flex-wrap gap-1.5 text-xs text-neutral-500 font-mono mt-0.5">
                               <span>{lesson.type}</span>
                               {!lesson.isPinned && (
                                 <>
                                   <span aria-hidden="true">·</span>
                                   <span>{lesson.createdAt}</span>
+                                  {formatPostTime(lesson.timestamp, lesson.id) && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span dir="ltr">{formatPostTime(lesson.timestamp, lesson.id)}</span>
+                                    </>
+                                  )}
                                 </>
                               )}
                             </div>
                           </div>
                         </div>
 
-                        {/* Admin Action Menu: Remove Notification (if active), Toggle Auto-Likes, Edit Post, Pin Post & Delete */}
+                        {/* Admin Action Menu: Remove Notification, Toggle Comments, Toggle Auto-Likes, Edit, Pin & Delete */}
                         {isAdmin && (
                           <div className="flex items-center flex-wrap gap-1.5">
                             {activeStudentNotif?.id === String(lesson.id) && (
@@ -2571,6 +3527,34 @@ export default function App() {
                                 <span className="hidden sm:inline">نزع الإشعار</span>
                               </button>
                             )}
+
+                            {/* Toggle Comments ON/OFF (Admin only) */}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleLessonComments(lesson.id)}
+                              className={`px-2 py-1.5 rounded-xl text-[11px] font-semibold transition-colors flex items-center gap-1 border cursor-pointer ${
+                                lesson.commentsEnabled === false
+                                  ? 'bg-neutral-100 text-neutral-600 border-neutral-300 hover:bg-neutral-200'
+                                  : 'bg-white text-black border-neutral-300 hover:bg-neutral-100'
+                              }`}
+                              title={
+                                lesson.commentsEnabled === false
+                                  ? 'التعليقات متوقفة — انقر لإعادة تشغيل التعليقات'
+                                  : 'إطفاء التعليقات على هذا المنشور'
+                              }
+                            >
+                              {lesson.commentsEnabled === false ? (
+                                <>
+                                  <Lock className="w-3 h-3" />
+                                  <span className="hidden sm:inline">تعليقات: متوقفة</span>
+                                </>
+                              ) : (
+                                <>
+                                  <MessageCircle className="w-3 h-3" />
+                                  <span className="hidden sm:inline">تعليقات: مفعّلة</span>
+                                </>
+                              )}
+                            </button>
 
                             {/* Pause / Resume Auto-Generated Likes Button (Admin only) */}
                             <button
@@ -2802,35 +3786,56 @@ export default function App() {
                       {/* Instagram-Style Interactive Bottom Actions Bar */}
                       <div className="px-3.5 sm:px-6 py-3 border-t border-neutral-100 flex flex-wrap items-center justify-between gap-2 text-neutral-700">
                         
-                        {/* Left: Like, Comment, Multi-Download */}
-                        <div className="flex items-center gap-3.5 sm:gap-4">
-                          {/* Like Button (Red Heart) */}
-                          <button
-                            type="button"
-                            onClick={() => handleToggleLike(lesson.id)}
-                            className={`flex items-center gap-1.5 transition-transform active:scale-110 cursor-pointer ${
-                              lesson.isLiked ? 'text-red-500 font-bold' : 'text-red-500/80 hover:text-red-500'
-                            }`}
-                            title="إعجاب"
-                          >
-                            <Heart className={`w-5 h-5 ${lesson.isLiked ? 'fill-red-500 text-red-500' : 'text-red-500'}`} />
-                            <span className="text-xs font-mono tabular-nums text-neutral-700">{lesson.likesCount || 0}</span>
-                          </button>
+                        {/* Left: Like (+ Admin +/-), Comment (Clean icon without numeric count), Multi-Download */}
+                        <div className="flex items-center gap-3 sm:gap-4">
+                          <div className="flex items-center gap-1.5">
+                            {/* Like Button (Red Heart) */}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleLike(lesson.id)}
+                              className={`flex items-center gap-1.5 transition-transform active:scale-110 cursor-pointer ${
+                                lesson.isLiked ? 'text-red-500 font-bold' : 'text-red-500/80 hover:text-red-500'
+                              }`}
+                              title="إعجاب"
+                            >
+                              <Heart className={`w-5 h-5 ${lesson.isLiked ? 'fill-red-500 text-red-500' : 'text-red-500'}`} />
+                              <span className="text-xs font-mono tabular-nums text-neutral-700">{lesson.likesCount || 0}</span>
+                            </button>
 
-                          {/* Comment Button (Triggers Slide-up/Pop-up Comments Modal) */}
+                            {/* Admin Likes Increment / Decrement (+/-) */}
+                            {isAdmin && (
+                              <div className="flex items-center gap-0.5 bg-neutral-100 border border-neutral-200 rounded-xl px-1 py-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminAdjustLikes(lesson.id, -1)}
+                                  className="w-5 h-5 rounded-lg hover:bg-neutral-200 text-black font-bold text-xs flex items-center justify-center transition-colors cursor-pointer"
+                                  title="إنقاص الإعجابات (-1)"
+                                  aria-label="إنقاص الإعجابات"
+                                >
+                                  -
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminAdjustLikes(lesson.id, 1)}
+                                  className="w-5 h-5 rounded-lg hover:bg-neutral-200 text-black font-bold text-xs flex items-center justify-center transition-colors cursor-pointer"
+                                  title="زيادة الإعجابات (+1)"
+                                  aria-label="زيادة الإعجابات"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Comment Button (Clean aesthetic icon, numeric count hidden) */}
                           <button
                             type="button"
                             onClick={() => setCommentsModalLesson(lesson)}
-                            className="flex items-center gap-1.5 text-neutral-500 hover:text-black transition-colors"
-                            title="عرض وإضافة تعليق"
+                            className="flex items-center gap-1.5 text-neutral-500 hover:text-black transition-colors cursor-pointer"
+                            title="التعليقات"
+                            aria-label="التعليقات"
                           >
                             <MessageCircle className="w-5 h-5" />
-                            <span className="text-xs font-mono tabular-nums">{visibleCommentsCount}</span>
-                            {isAdmin && pendingCount > 0 && (
-                              <span className="text-[10px] bg-black text-white px-1.5 py-0.2 rounded-full font-mono">
-                                +{pendingCount}
-                              </span>
-                            )}
                           </button>
 
                           {/* Multi-Download */}
@@ -2845,7 +3850,7 @@ export default function App() {
                                   pdfs.forEach(p => triggerDownload(p.url, p.name));
                                 }
                               }}
-                              className="flex items-center gap-1.5 text-neutral-500 hover:text-black transition-colors text-xs font-medium"
+                              className="flex items-center gap-1.5 text-neutral-500 hover:text-black transition-colors text-xs font-medium cursor-pointer"
                               title={`تحميل كافة المرفقات (${images.length} صور, ${pdfs.length} ملفات)`}
                             >
                               <Download className="w-5 h-5" />
@@ -2856,14 +3861,14 @@ export default function App() {
                           )}
                         </div>
 
-                        {/* Quick Comments Link */}
+                        {/* Quick Comments Link (No comment counts displayed) */}
                         <button
                           type="button"
                           onClick={() => setCommentsModalLesson(lesson)}
-                          className="text-xs text-neutral-400 hover:text-black transition-colors"
+                          className="text-xs text-neutral-400 hover:text-black transition-colors cursor-pointer"
                         >
-                          {visibleCommentsCount > 0 
-                            ? `عرض كل التعليقات (${visibleCommentsCount})` 
+                          {visibleCommentsCount > 0 || lesson.commentsEnabled === false
+                            ? 'عرض التعليقات'
                             : 'أضف تعليقاً...'}
                         </button>
                       </div>
@@ -2892,8 +3897,8 @@ export default function App() {
             dir="rtl"
           >
             {/* Modal Header */}
-            <div className="p-4 border-b border-neutral-100 flex items-center justify-between">
-              <div>
+            <div className="p-4 border-b border-neutral-100 flex items-center justify-between gap-2">
+              <div className="min-w-0 flex-1">
                 <h3 className="text-base font-bold text-black">
                   التعليقات والمناقشات
                 </h3>
@@ -2902,13 +3907,39 @@ export default function App() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setCommentsModalLesson(null)}
-                className="p-1.5 rounded-full hover:bg-neutral-100 text-neutral-400 hover:text-black transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => handleToggleLessonComments(commentsModalLesson.id)}
+                    className={`px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-colors cursor-pointer flex items-center gap-1 ${
+                      commentsModalLesson.commentsEnabled === false
+                        ? 'bg-neutral-100 text-neutral-700 border-neutral-300 hover:bg-neutral-200'
+                        : 'bg-black text-white border-black hover:bg-neutral-800'
+                    }`}
+                  >
+                    {commentsModalLesson.commentsEnabled === false ? (
+                      <>
+                        <Lock className="w-3 h-3" />
+                        <span>تشغيل التعليقات</span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-3 h-3" />
+                        <span>إيقاف التعليقات</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setCommentsModalLesson(null)}
+                  className="p-1.5 rounded-full hover:bg-neutral-100 text-neutral-400 hover:text-black transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Moderation Pending Notice for Visitor */}
@@ -3064,49 +4095,63 @@ export default function App() {
               })()}
             </div>
 
-            {/* Bottom Fixed Input Bar */}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleAddComment(commentsModalLesson.id, modalCommentInput);
-                setModalCommentInput('');
-              }}
-              className="p-3 border-t border-neutral-200 bg-white space-y-2"
-            >
-              {commentPendingNotice && (
-                <div className="px-3 py-2 bg-black text-white rounded-xl text-xs font-medium flex items-center gap-2 animate-in fade-in">
-                  <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
-                  <span>{commentPendingNotice}</span>
-                </div>
-              )}
-
-              <div className="flex items-center justify-between text-[11px] text-neutral-500 px-1">
-                <span>
-                  النشر بصفتك: <strong className="text-black">{isAdmin ? 'KAOUANE fares (أستاذ)' : `مجهول الهوية #${getSessionAnonId()}`}</strong>
-                </span>
-                {!isAdmin && (
-                  <span className="text-neutral-400 text-[10px]">تخضع التعليقات لموافقة المدير</span>
+            {/* Bottom Fixed Input Bar OR Disabled Comments Notice */}
+            {commentsModalLesson.commentsEnabled === false && !isAdmin ? (
+              <div className="p-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-center gap-2 text-xs font-semibold text-neutral-600">
+                <Lock className="w-4 h-4 text-neutral-500 shrink-0" />
+                <span>تم إيقاف التعليقات على هذا المنشور من طرف المدير</span>
+              </div>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleAddComment(commentsModalLesson.id, modalCommentInput);
+                  setModalCommentInput('');
+                }}
+                className="p-3 border-t border-neutral-200 bg-white space-y-2"
+              >
+                {commentsModalLesson.commentsEnabled === false && isAdmin && (
+                  <div className="px-3 py-1.5 bg-neutral-100 border border-neutral-300 text-neutral-700 rounded-xl text-[11px] font-semibold flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span>التعليقات متوقفة للطلبة حالياً (يمكنك الرد كمسؤول أو إعادة تشغيلها)</span>
+                  </div>
                 )}
-              </div>
 
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={modalCommentInput}
-                  onChange={(e) => setModalCommentInput(e.target.value)}
-                  placeholder={isAdmin ? "الرد بصفتك الأستاذ KAOUANE fares..." : "اكتب سؤالك أو استفسارك هنا..."}
-                  className="flex-1 px-4 py-2.5 text-xs bg-neutral-50 border border-neutral-300 rounded-2xl focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
-                />
-                <button
-                  type="submit"
-                  disabled={!modalCommentInput.trim()}
-                  className="p-2.5 bg-black hover:bg-neutral-800 disabled:opacity-40 text-white rounded-2xl transition-colors shrink-0 cursor-pointer"
-                  title="إرسال"
-                >
-                  <Send className="w-4 h-4 rotate-180" />
-                </button>
-              </div>
-            </form>
+                {commentPendingNotice && (
+                  <div className="px-3 py-2 bg-black text-white rounded-xl text-xs font-medium flex items-center gap-2 animate-in fade-in">
+                    <CheckCircle2 className="w-4 h-4 text-white shrink-0" />
+                    <span>{commentPendingNotice}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between text-[11px] text-neutral-500 px-1">
+                  <span>
+                    النشر بصفتك: <strong className="text-black">{isAdmin ? 'KAOUANE fares (أستاذ)' : `مجهول الهوية #${getSessionAnonId()}`}</strong>
+                  </span>
+                  {!isAdmin && (
+                    <span className="text-neutral-400 text-[10px]">تخضع التعليقات لموافقة المدير</span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={modalCommentInput}
+                    onChange={(e) => setModalCommentInput(e.target.value)}
+                    placeholder={isAdmin ? "الرد بصفتك الأستاذ KAOUANE fares..." : "اكتب سؤالك أو استفسارك هنا..."}
+                    className="flex-1 px-4 py-2.5 text-xs bg-neutral-50 border border-neutral-300 rounded-2xl focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!modalCommentInput.trim()}
+                    className="p-2.5 bg-black hover:bg-neutral-800 disabled:opacity-40 text-white rounded-2xl transition-colors shrink-0 cursor-pointer"
+                    title="إرسال"
+                  >
+                    <Send className="w-4 h-4 rotate-180" />
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
@@ -3539,34 +4584,74 @@ export default function App() {
                 )}
               </div>
 
-              {/* Custom Publication Date (Admin only) */}
-              <div>
-                <label htmlFor="lesson-date-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
-                  تاريخ النشر (تخصيص التاريخ):
-                </label>
-                <input
-                  id="lesson-date-input"
-                  type="date"
-                  value={newLessonDate}
-                  onChange={(e) => setNewLessonDate(e.target.value)}
-                  className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
-                />
+              {/* Custom Publication Date & Time (Admin only) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="lesson-date-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                    تاريخ النشر:
+                  </label>
+                  <input
+                    id="lesson-date-input"
+                    type="date"
+                    value={newLessonDate}
+                    onChange={(e) => setNewLessonDate(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="lesson-time-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                    ساعة النشر:
+                  </label>
+                  <input
+                    id="lesson-time-input"
+                    type="time"
+                    value={newLessonTime}
+                    onChange={(e) => setNewLessonTime(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                  />
+                </div>
               </div>
 
-              {/* Description */}
+              {/* Description (with dual ref capture for reliable mobile & IME saving) */}
               <div>
                 <label htmlFor="lesson-desc-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
                   توصيف المحتوى والشرح (اختياري):
                 </label>
                 <textarea
                   id="lesson-desc-input"
+                  ref={addLessonDescRef}
                   value={newLessonDescription}
                   onChange={(e) => setNewLessonDescription(e.target.value)}
+                  onBlur={(e) => setNewLessonDescription(e.target.value)}
                   placeholder="اكتب توضيحات للطلبة أو محاور المحاضرة..."
                   rows={3}
-                  className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white resize-none"
+                  dir="rtl"
+                  className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white resize-y"
                 />
               </div>
+
+              {/* Comments Toggle on Publish */}
+              <button
+                type="button"
+                onClick={() => setNewLessonCommentsEnabled(prev => !prev)}
+                className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl border text-xs font-semibold transition-colors cursor-pointer ${
+                  newLessonCommentsEnabled
+                    ? 'bg-neutral-50 text-black border-neutral-300 hover:bg-neutral-100'
+                    : 'bg-neutral-100 text-neutral-600 border-neutral-300 hover:bg-neutral-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {newLessonCommentsEnabled ? (
+                    <MessageCircle className="w-4 h-4 text-black" />
+                  ) : (
+                    <Lock className="w-4 h-4 text-neutral-600" />
+                  )}
+                  <span>إمكانية التعليق على هذا المنشور</span>
+                </div>
+                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${newLessonCommentsEnabled ? 'bg-black text-white' : 'bg-white text-neutral-600 border border-neutral-300'}`}>
+                  {newLessonCommentsEnabled ? 'مفعّلة' : 'متوقفة'}
+                </span>
+              </button>
 
               {/* Multiple Images Upload */}
               <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
@@ -3807,6 +4892,7 @@ export default function App() {
                   {isNewsView ? 'عنوان الخبر أو المنشور:' : 'عنوان الدرس:'}
                 </label>
                 <input
+                  ref={editLessonTitleInputRef}
                   type="text"
                   value={editLessonTitle}
                   onChange={(e) => setEditLessonTitle(e.target.value)}
@@ -3842,32 +4928,74 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Custom Publication Date (Admin only) */}
-              <div>
-                <label htmlFor="edit-lesson-date-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
-                  تاريخ النشر (تعديل تاريخ النشر):
-                </label>
-                <input
-                  id="edit-lesson-date-input"
-                  type="date"
-                  value={editLessonDate}
-                  onChange={(e) => setEditLessonDate(e.target.value)}
-                  className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
-                />
+              {/* Custom Publication Date & Time (Admin only) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="edit-lesson-date-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                    تاريخ النشر:
+                  </label>
+                  <input
+                    id="edit-lesson-date-input"
+                    type="date"
+                    value={editLessonDate}
+                    onChange={(e) => setEditLessonDate(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="edit-lesson-time-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                    ساعة النشر:
+                  </label>
+                  <input
+                    id="edit-lesson-time-input"
+                    type="time"
+                    value={editLessonTime}
+                    onChange={(e) => setEditLessonTime(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black focus:outline-none focus:ring-1 focus:ring-black focus:bg-white"
+                  />
+                </div>
               </div>
 
-              {/* Description */}
+              {/* Description (with dual ref capture for guaranteed persistence) */}
               <div>
-                <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                <label htmlFor="edit-lesson-desc-input" className="block text-xs font-semibold text-neutral-800 mb-1.5">
                   توصيف المحتوى والشرح:
                 </label>
                 <textarea
+                  id="edit-lesson-desc-input"
+                  ref={editLessonDescRef}
                   value={editLessonDescription}
                   onChange={(e) => setEditLessonDescription(e.target.value)}
+                  onBlur={(e) => setEditLessonDescription(e.target.value)}
                   rows={3}
-                  className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white resize-none"
+                  dir="rtl"
+                  placeholder="اكتب وصف المنشور..."
+                  className="w-full px-4 py-2.5 bg-neutral-50 border border-neutral-300 rounded-2xl text-sm text-black placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-black focus:bg-white resize-y"
                 />
               </div>
+
+              {/* Comments Toggle inside Edit Modal */}
+              <button
+                type="button"
+                onClick={() => setEditLessonCommentsEnabled(prev => !prev)}
+                className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl border text-xs font-semibold transition-colors cursor-pointer ${
+                  editLessonCommentsEnabled
+                    ? 'bg-neutral-50 text-black border-neutral-300 hover:bg-neutral-100'
+                    : 'bg-neutral-100 text-neutral-600 border-neutral-300 hover:bg-neutral-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {editLessonCommentsEnabled ? (
+                    <MessageCircle className="w-4 h-4 text-black" />
+                  ) : (
+                    <Lock className="w-4 h-4 text-neutral-600" />
+                  )}
+                  <span>إمكانية التعليق على هذا المنشور</span>
+                </div>
+                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${editLessonCommentsEnabled ? 'bg-black text-white' : 'bg-white text-neutral-600 border border-neutral-300'}`}>
+                  {editLessonCommentsEnabled ? 'مفعّلة' : 'متوقفة'}
+                </span>
+              </button>
 
               {/* Manage Attached Images */}
               <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
@@ -4025,10 +5153,17 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  disabled={!editLessonTitle.trim() || isUploadingEditImages || isUploadingEditPdfs}
-                  className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-black hover:bg-neutral-800 disabled:opacity-40 transition-colors shadow-xs"
+                  disabled={!editLessonTitle.trim() || isUploadingEditImages || isUploadingEditPdfs || isSavingEditLesson}
+                  className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-black hover:bg-neutral-800 disabled:opacity-40 transition-colors shadow-xs flex items-center gap-2 cursor-pointer"
                 >
-                  حفظ التعديلات
+                  {isSavingEditLesson ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                      <span>جاري الحفظ...</span>
+                    </>
+                  ) : (
+                    <span>حفظ التعديلات</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -4267,6 +5402,82 @@ export default function App() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TELEGRAM IN-APP BROWSER DOWNLOAD HELPER MODAL */}
+      {telegramDownloadFallback && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-150"
+          onClick={() => setTelegramDownloadFallback(null)}
+        >
+          <div
+            className="bg-white rounded-t-3xl sm:rounded-3xl border border-neutral-200 w-full max-w-md p-5 sm:p-6 shadow-2xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+            dir="rtl"
+          >
+            <div className="flex items-center justify-between gap-2 pb-3 border-b border-neutral-100">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-black text-white flex items-center justify-center shrink-0">
+                  <Download className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-black truncate">
+                    تحميل الملف: {telegramDownloadFallback.filename}
+                  </h3>
+                  <p className="text-[11px] text-neutral-500">
+                    متصفح تلغرام الداخلي يقيّد التحميل التلقائي أحياناً
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTelegramDownloadFallback(null)}
+                className="p-1.5 rounded-full hover:bg-neutral-100 text-neutral-400 hover:text-black"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2.5 text-xs text-neutral-700 leading-relaxed">
+              {telegramDownloadFallback.directUrl && (
+                <a
+                  href={telegramDownloadFallback.directUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-black hover:bg-neutral-800 text-white rounded-2xl font-bold transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>اضغط هنا لفتح وتحميل الملف مباشرة</span>
+                </a>
+              )}
+
+              {telegramDownloadFallback.dataUrl && (
+                <a
+                  href={telegramDownloadFallback.dataUrl}
+                  download={telegramDownloadFallback.filename}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-neutral-100 hover:bg-neutral-200 text-black border border-neutral-300 rounded-2xl font-bold transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>محاولة التحميل المباشر</span>
+                </a>
+              )}
+
+              <a
+                href={typeof window !== 'undefined' ? getExternalBrowserHref(window.location.href) : '#'}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-black hover:bg-neutral-800 text-white rounded-2xl font-bold transition-colors"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>فتح الصفحة في المتصفح الخارجي (Chrome / Safari)</span>
+              </a>
+
+              <p className="text-[11px] text-neutral-500 text-center pt-1">
+                أو اضغط على النقاط الثلاث (⋮) في أعلى تلغرام واختر &quot;فتح في المتصفح&quot;.
+              </p>
             </div>
           </div>
         </div>

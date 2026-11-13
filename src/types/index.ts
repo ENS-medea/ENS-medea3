@@ -36,6 +36,7 @@ export interface LessonItem {
   likesCount: number;
   baseLikes?: number;
   userLikes?: number;
+  manualLikesOffset?: number;
   lastLikesSyncedAt?: number;
   autoLikesEnabled?: boolean;
   frozenAutoLikes?: number;
@@ -43,9 +44,24 @@ export interface LessonItem {
   likesServerShard?: 1 | 2;
   isLiked?: boolean;
   isPinned?: boolean;
+  commentsEnabled?: boolean;
   timestamp?: number;
   comments: CommentItem[];
   createdAt: string;
+}
+
+export interface StudentSubmissionItem {
+  id: string;
+  senderName: string;
+  yearLabel: string;
+  moduleName: string;
+  title: string;
+  description: string;
+  images: AttachedImage[];
+  pdfs: AttachedPdf[];
+  isRead?: boolean;
+  createdAt: string;
+  timestamp: number;
 }
 
 export interface SpecializationItem {
