@@ -9,6 +9,34 @@
     <meta property="og:description" content="ENS Medea - منصة المقاييس والموارد البيداغوجية" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      (function () {
+        try {
+          if (window.top !== window.self) return;
+          var ua = navigator.userAgent || '';
+          var isTg =
+            /Telegram/i.test(ua) ||
+            Boolean(window.TelegramWebviewProxy || window.TelegramWebview || (window.Telegram && window.Telegram.WebView)) ||
+            /t\.me/i.test(document.referrer || '');
+          if (!isTg) return;
+          if (sessionStorage.getItem('ens_tg_head_redirected') === '1') return;
+          sessionStorage.setItem('ens_tg_head_redirected', '1');
+          var href = window.location.href;
+          if (/Android/i.test(ua)) {
+            var scheme = href.indexOf('http://') === 0 ? 'http' : 'https';
+            var stripped = href.replace(/^https?:\/\//i, '');
+            var intentUrl =
+              'intent://' + stripped +
+              '#Intent;scheme=' + scheme +
+              ';package=com.android.chrome;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;S.browser_fallback_url=' +
+              encodeURIComponent(href) + ';end';
+            window.location.replace(intentUrl);
+          } else if (/iPhone|iPad|iPod/i.test(ua) && /OS (1[7-9]|[2-9]\d)_/i.test(ua)) {
+            window.location.replace('x-safari-' + href);
+          }
+        } catch (e) {}
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,600;1,700&family=Playfair+Display:ital,wght@1,600;1,700&family=Cinzel:wght@600;700&family=Cairo:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700&display=swap" rel="stylesheet">

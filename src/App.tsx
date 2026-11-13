@@ -29,8 +29,6 @@ import {
   Bell,
   BellRing,
   BellOff,
-  ExternalLink,
-  Copy,
   Inbox
 } from 'lucide-react';
 import { AttachedImage, AttachedPdf, CommentItem, LessonItem, ModuleItem, SpecializationItem, StudentSubmissionItem } from './types';
@@ -56,6 +54,7 @@ import {
   updateRealUserLikeOnShard,
   subscribeLessonLikesFromShards,
   resolveMediaUrl,
+  resolveMediaBlob,
   resolveMediaDataUrl,
   isFirestoreMediaUrl,
   subscribeAdminNewsPosts,
@@ -133,11 +132,15 @@ const getExternalBrowserHref = (url: string): string => {
   if (typeof navigator === 'undefined') return url;
   const ua = navigator.userAgent || '';
   if (/Android/i.test(ua)) {
-    if (url.startsWith('https://')) {
-      return `intent://${url.slice(8)}#Intent;scheme=https;package=com.android.chrome;action=android.intent.action.VIEW;end`;
+    if (url.startsWith('https://') || url.startsWith('http://')) {
+      const scheme = url.startsWith('http://') ? 'http' : 'https';
+      const stripped = url.replace(/^https?:\/\//i, '');
+      return `intent://${stripped}#Intent;scheme=${scheme};package=com.android.chrome;action=android.intent.action.VIEW;category=android.intent.category.BROWSABLE;S.browser_fallback_url=${encodeURIComponent(url)};end`;
     }
-    if (url.startsWith('http://')) {
-      return `intent://${url.slice(7)}#Intent;scheme=http;package=com.android.chrome;action=android.intent.action.VIEW;end`;
+  }
+  if (/iPhone|iPad|iPod/i.test(ua) && /OS (1[7-9]|[2-9]\d)_/i.test(ua)) {
+    if (url.startsWith('https://') || url.startsWith('http://')) {
+      return `x-safari-${url}`;
     }
   }
   return url;
@@ -190,15 +193,9 @@ export default function App() {
   const [isNewsView, setIsNewsView] = useState<boolean>(initialNav.isNews);
   const [isSubmissionsView, setIsSubmissionsView] = useState<boolean>(initialNav.isSubmissions);
 
-  // Telegram In-App Browser detection & Download helper state
+  // Telegram In-App Browser detection
   const [isTelegramBrowser] = useState<boolean>(() => detectTelegramInAppBrowser());
-  const [telegramBannerDismissed, setTelegramBannerDismissed] = useState(false);
-  const [telegramDownloadFallback, setTelegramDownloadFallback] = useState<{
-    filename: string;
-    directUrl?: string;
-    dataUrl?: string;
-    isPdf?: boolean;
-  } | null>(null);
+  const isDownloadingInTelegramRef = useRef(false);
 
   // Admin Authentication state
   const [isAdmin, setIsAdmin] = useState<boolean>(() => isCurrentAdminLoggedIn());
@@ -297,27 +294,39 @@ export default function App() {
     }
   }, [selectedYear, selectedSpecializationId, activeModuleId, isNewsView, isSubmissionsView]);
 
-  // Attempt automatic external Chrome handoff on Android when opened inside Telegram in-app browser
+  // Silent, immediate external browser handoff when opened inside Telegram in-app browser
   useEffect(() => {
     if (!isTelegramBrowser || typeof window === 'undefined') return;
     if (window.top !== window.self) return;
-    const ua = navigator.userAgent || '';
-    if (!/Android/i.test(ua)) return;
-
-    try {
-      if (sessionStorage.getItem('ens_tg_auto_external_tried') === 'true') return;
-      sessionStorage.setItem('ens_tg_auto_external_tried', 'true');
-    } catch {}
 
     const externalHref = getExternalBrowserHref(window.location.href);
-    if (externalHref !== window.location.href) {
-      const a = document.createElement('a');
-      a.href = externalHref;
-      a.rel = 'noopener noreferrer';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    }
+    if (externalHref === window.location.href) return;
+
+    try {
+      if (sessionStorage.getItem('ens_tg_auto_external_tried') !== 'true') {
+        sessionStorage.setItem('ens_tg_auto_external_tried', 'true');
+        window.location.replace(externalHref);
+      }
+    } catch {}
+
+    // Silent one-time user-gesture fallback for WebViews that block non-gesture intent:// redirects
+    const handleSilentGestureRedirect = () => {
+      if (isDownloadingInTelegramRef.current) return;
+      try {
+        if (sessionStorage.getItem('ens_tg_gesture_redirected') === '1') return;
+        sessionStorage.setItem('ens_tg_gesture_redirected', '1');
+      } catch {}
+      document.removeEventListener('click', handleSilentGestureRedirect);
+      const targetHref = getExternalBrowserHref(window.location.href);
+      if (targetHref !== window.location.href) {
+        window.location.href = targetHref;
+      }
+    };
+
+    document.addEventListener('click', handleSilentGestureRedirect);
+    return () => {
+      document.removeEventListener('click', handleSilentGestureRedirect);
+    };
   }, [isTelegramBrowser]);
 
   // Handle browser Back/Forward navigation cleanly
@@ -2077,7 +2086,7 @@ export default function App() {
     }
   };
 
-  // Download Trigger Utility (Supports regular browsers AND Telegram In-App Browser reliably)
+  // Download Trigger Utility (Supports regular browsers AND silent Telegram In-App Browser downloads)
   const triggerDownload = async (url?: string, filename = 'document.pdf') => {
     if (!url || url === '#') {
       const blob = new Blob([`ENS Medea Document: ${filename}`], { type: 'application/pdf' });
@@ -2093,36 +2102,86 @@ export default function App() {
     }
 
     try {
-      const isPdf = filename.toLowerCase().endsWith('.pdf') || url.toLowerCase().includes('.pdf');
-
-      // Special robust handling for Telegram In-App WebView (blocks blob: downloads!)
+      // Telegram In-App WebView silently ignores <a href="blob:..." download> and blocked popups.
+      // Handle downloads cleanly with zero banners or modals via Web Share API, Chrome intent handoff, or direct URI.
       if (isTelegramBrowser) {
+        isDownloadingInTelegramRef.current = true;
+        const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+        const isAndroid = /Android/i.test(ua);
+
         if (isFirestoreMediaUrl(url)) {
-          setAdminSuccessNotification('جاري تحضير الملف للتحميل...');
-          setTimeout(() => setAdminSuccessNotification(null), 2500);
+          const { blob, mimeType, name } = await resolveMediaBlob(url);
+          const finalName = filename || name || 'document.pdf';
+          const file = new File([blob], finalName, { type: mimeType || 'application/octet-stream' });
+          const navAny = navigator as any;
+
+          if (
+            typeof navAny.canShare === 'function' &&
+            navAny.canShare({ files: [file] }) &&
+            typeof navAny.share === 'function'
+          ) {
+            try {
+              await navAny.share({ files: [file], title: finalName });
+              return;
+            } catch (shareErr: any) {
+              if (shareErr?.name === 'AbortError') return;
+            }
+          }
+
+          if (isAndroid) {
+            try {
+              sessionStorage.setItem('ens_tg_gesture_redirected', '1');
+            } catch {}
+            const handoffUrl = new URL(window.location.href);
+            handoffUrl.searchParams.set('autoDownload', url);
+            handoffUrl.searchParams.set('autoName', finalName);
+            window.location.href = getExternalBrowserHref(handoffUrl.toString());
+            return;
+          }
+
           const dataUrl = await resolveMediaDataUrl(url);
           const a = document.createElement('a');
           a.href = dataUrl;
-          a.download = filename;
+          a.download = finalName;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          setTelegramDownloadFallback({ filename, dataUrl, isPdf });
           return;
         }
 
-        // Direct HTTP/HTTPS URL inside Telegram WebView: use native external/Chrome intent or direct link fallback
-        const externalLink = getExternalBrowserHref(url);
-        const a = document.createElement('a');
-        a.href = externalLink;
-        if (externalLink === url) {
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
+        // Direct HTTP/HTTPS URL inside Telegram WebView:
+        try {
+          const resp = await fetch(url, { mode: 'cors' });
+          if (resp.ok) {
+            const blob = await resp.blob();
+            const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+            const navAny = navigator as any;
+            if (
+              typeof navAny.canShare === 'function' &&
+              navAny.canShare({ files: [file] }) &&
+              typeof navAny.share === 'function'
+            ) {
+              try {
+                await navAny.share({ files: [file], title: filename });
+                return;
+              } catch (shareErr: any) {
+                if (shareErr?.name === 'AbortError') return;
+              }
+            }
+          }
+        } catch {
+          // Proceed to external/direct download handoff
         }
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTelegramDownloadFallback({ filename, directUrl: url, isPdf });
+
+        if (isAndroid) {
+          try {
+            sessionStorage.setItem('ens_tg_gesture_redirected', '1');
+          } catch {}
+          window.location.href = getExternalBrowserHref(url);
+          return;
+        }
+
+        window.location.assign(url);
         return;
       }
 
@@ -2162,8 +2221,25 @@ export default function App() {
       console.warn('Download error:', err);
       setAdminSuccessNotification('تعذر تحميل الملف حالياً، يرجى المحاولة مرة أخرى');
       setTimeout(() => setAdminSuccessNotification(null), 3000);
+    } finally {
+      isDownloadingInTelegramRef.current = false;
     }
   };
+
+  // Auto-execute pending file download after Telegram WebView hands off to external browser
+  useEffect(() => {
+    if (typeof window === 'undefined' || isTelegramBrowser) return;
+    const params = new URLSearchParams(window.location.search);
+    const autoDownloadUrl = params.get('autoDownload');
+    if (!autoDownloadUrl) return;
+    const autoName = params.get('autoName') || 'document.pdf';
+    params.delete('autoDownload');
+    params.delete('autoName');
+    const qs = params.toString();
+    const cleanUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash || ''}`;
+    window.history.replaceState(null, '', cleanUrl);
+    void triggerDownload(autoDownloadUrl, autoName);
+  }, [isTelegramBrowser]);
 
   // Multi-Image Sequential Download
   const handleDownloadAllPostImages = async (images: AttachedImage[], postTitle: string) => {
@@ -2434,65 +2510,6 @@ export default function App() {
 
         </div>
       </header>
-
-      {/* Telegram In-App Browser External Redirect & Download Warning Banner */}
-      {isTelegramBrowser && !telegramBannerDismissed && (
-        <div className="w-full max-w-7xl mx-auto px-2 sm:px-4 md:px-6 mt-3" dir="rtl">
-          <div className="p-3 sm:p-4 bg-black text-white rounded-2xl border border-neutral-800 shadow-md flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-start gap-2.5 min-w-0 flex-1">
-              <div className="w-9 h-9 rounded-xl bg-white text-black flex items-center justify-center shrink-0 mt-0.5">
-                <ExternalLink className="w-4 h-4" />
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs sm:text-sm font-bold text-white leading-snug">
-                  أنت تتصفح من داخل متصفح تلغرام
-                </p>
-                <p className="text-[11px] text-neutral-300 mt-0.5 leading-relaxed">
-                  لتحميل الملفات والصور بسلاسة، افتح المنصة في المتصفح الخارجي (Chrome / Safari) أو اضغط النقاط الثلاث (⋮) ثم &quot;فتح في المتصفح&quot;.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end">
-              <a
-                href={typeof window !== 'undefined' ? getExternalBrowserHref(window.location.href) : '#'}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white hover:bg-neutral-200 text-black rounded-xl text-xs font-bold transition-colors shadow-xs"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                <span>فتح في المتصفح الخارجي</span>
-              </a>
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof window !== 'undefined') {
-                    navigator.clipboard.writeText(window.location.href).then(() => {
-                      setAdminSuccessNotification('تم نسخ الرابط، يمكنك لصقه في المتصفح الخارجي');
-                      setTimeout(() => setAdminSuccessNotification(null), 3000);
-                    }).catch(() => {});
-                  }
-                }}
-                className="inline-flex items-center gap-1 px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl text-xs font-medium border border-neutral-700 transition-colors cursor-pointer"
-                title="نسخ الرابط"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                <span>نسخ</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setTelegramBannerDismissed(true)}
-                className="p-1.5 text-neutral-400 hover:text-white rounded-lg cursor-pointer"
-                title="إغلاق التنبيه"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Top Search Bar (Toggled when user clicks the search icon in header) */}
       {isSearchVisible && !isSubmissionsView && (
@@ -5402,82 +5419,6 @@ export default function App() {
                   </button>
                 )}
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* TELEGRAM IN-APP BROWSER DOWNLOAD HELPER MODAL */}
-      {telegramDownloadFallback && (
-        <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-150"
-          onClick={() => setTelegramDownloadFallback(null)}
-        >
-          <div
-            className="bg-white rounded-t-3xl sm:rounded-3xl border border-neutral-200 w-full max-w-md p-5 sm:p-6 shadow-2xl space-y-4"
-            onClick={(e) => e.stopPropagation()}
-            dir="rtl"
-          >
-            <div className="flex items-center justify-between gap-2 pb-3 border-b border-neutral-100">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-9 h-9 rounded-xl bg-black text-white flex items-center justify-center shrink-0">
-                  <Download className="w-4 h-4" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-sm font-bold text-black truncate">
-                    تحميل الملف: {telegramDownloadFallback.filename}
-                  </h3>
-                  <p className="text-[11px] text-neutral-500">
-                    متصفح تلغرام الداخلي يقيّد التحميل التلقائي أحياناً
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setTelegramDownloadFallback(null)}
-                className="p-1.5 rounded-full hover:bg-neutral-100 text-neutral-400 hover:text-black"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-2.5 text-xs text-neutral-700 leading-relaxed">
-              {telegramDownloadFallback.directUrl && (
-                <a
-                  href={telegramDownloadFallback.directUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-black hover:bg-neutral-800 text-white rounded-2xl font-bold transition-colors"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>اضغط هنا لفتح وتحميل الملف مباشرة</span>
-                </a>
-              )}
-
-              {telegramDownloadFallback.dataUrl && (
-                <a
-                  href={telegramDownloadFallback.dataUrl}
-                  download={telegramDownloadFallback.filename}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-neutral-100 hover:bg-neutral-200 text-black border border-neutral-300 rounded-2xl font-bold transition-colors"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>محاولة التحميل المباشر</span>
-                </a>
-              )}
-
-              <a
-                href={typeof window !== 'undefined' ? getExternalBrowserHref(window.location.href) : '#'}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-black hover:bg-neutral-800 text-white rounded-2xl font-bold transition-colors"
-              >
-                <ExternalLink className="w-4 h-4" />
-                <span>فتح الصفحة في المتصفح الخارجي (Chrome / Safari)</span>
-              </a>
-
-              <p className="text-[11px] text-neutral-500 text-center pt-1">
-                أو اضغط على النقاط الثلاث (⋮) في أعلى تلغرام واختر &quot;فتح في المتصفح&quot;.
-              </p>
             </div>
           </div>
         </div>

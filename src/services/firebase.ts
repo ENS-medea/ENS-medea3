@@ -683,6 +683,34 @@ export function getCachedResolvedMediaUrl(url?: string): string | undefined {
 }
 
 /**
+ * Resolves a `firestore-media://{id}` URL into raw `{ blob, mimeType, name }`
+ */
+export async function resolveMediaBlob(url: string): Promise<{ blob: Blob; mimeType: string; name: string }> {
+  const mediaId = url.slice(FIRESTORE_MEDIA_PREFIX.length);
+  const metaSnap = await getDoc(doc(db, 'uploaded_media', mediaId));
+  if (!metaSnap.exists()) {
+    throw new Error('لم يتم العثور على الملف في السحابة');
+  }
+  const meta = metaSnap.data();
+  const mimeType = String(meta.mimeType || 'application/octet-stream');
+  const name = String(meta.name || 'file');
+
+  const chunksSnap = await getDocs(collection(db, 'uploaded_media', mediaId, 'chunks'));
+  const chunkDocs: { index: number; data: string }[] = [];
+  chunksSnap.forEach((d) => {
+    const data = d.data();
+    chunkDocs.push({
+      index: typeof data.index === 'number' ? data.index : Number(d.id) || 0,
+      data: String(data.data || ''),
+    });
+  });
+  chunkDocs.sort((a, b) => a.index - b.index);
+  const fullBase64 = chunkDocs.map((c) => c.data).join('');
+  const blob = base64ToBlob(fullBase64, mimeType);
+  return { blob, mimeType, name };
+}
+
+/**
  * Resolves a `firestore-media://{id}` URL into a base64 Data URL (`data:...;base64,...`)
  * for environments (such as Telegram's Android/iOS in-app browser) that block `blob:` downloads.
  */
