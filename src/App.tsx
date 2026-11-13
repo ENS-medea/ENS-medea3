@@ -1801,8 +1801,8 @@ export default function App() {
                 alt="ENS Medea Logo" 
                 className={`h-[52px] sm:h-[62px] md:h-[66px] w-auto ${
                   isAdmin && (activeModule || isNewsView)
-                    ? 'max-w-[130px] sm:max-w-none'
-                    : 'max-w-[180px] sm:max-w-none'
+                    ? 'max-w-[110px] sm:max-w-none'
+                    : 'max-w-[175px] sm:max-w-none'
                 } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = NEW_LOGO_URL;
@@ -1829,7 +1829,7 @@ export default function App() {
                   setNewsTypeFilter('all');
                 }
               }}
-              className={`p-2 sm:p-2.5 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
                 isNewsView
                   ? 'bg-black text-white border-black shadow-xs'
                   : 'text-neutral-700 hover:text-black hover:bg-neutral-100 border-neutral-200 shadow-2xs'
@@ -1837,14 +1837,14 @@ export default function App() {
               title={isNewsView ? "العودة لقائمة المقاييس والسنة" : "منشورات المدير (الأخبار وآخر المستجدات)"}
               aria-label={isNewsView ? "العودة لقائمة المقاييس والسنة" : "منشورات المدير"}
             >
-              <Home className="w-5 h-5 sm:w-[22px] sm:h-[22px]" />
+              <Home className="w-6 h-6 sm:w-7 sm:h-7 stroke-[2.2]" />
             </button>
 
             {/* Search Magnifying Glass Icon Button */}
             <button
               type="button"
               onClick={() => setIsSearchVisible(prev => !prev)}
-              className={`p-2 sm:p-2.5 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
+              className={`w-10 h-10 sm:w-11 sm:h-11 rounded-xl transition-all duration-150 cursor-pointer flex items-center justify-center shrink-0 border ${
                 isSearchVisible 
                   ? 'bg-black text-white border-black shadow-xs' 
                   : 'text-neutral-700 hover:text-black hover:bg-neutral-100 border-neutral-200 shadow-2xs'
@@ -1852,7 +1852,7 @@ export default function App() {
               title={isSearchVisible ? "إخفاء شريط البحث" : "البحث (عدسة مكبرة)"}
               aria-label="البحث"
             >
-              <Search className="w-5 h-5 sm:w-[22px] sm:h-[22px]" />
+              <Search className="w-6 h-6 sm:w-7 sm:h-7 stroke-[2.2]" />
             </button>
 
             {/* Admin Status & Logout */}
@@ -1913,7 +1913,7 @@ export default function App() {
                   setLessonTypeFilter('all');
                   setNewsTypeFilter('all');
                 }}
-                className="p-2 sm:p-2.5 rounded-xl text-black hover:bg-neutral-100 transition-all duration-150 cursor-pointer group flex items-center justify-center shrink-0 border border-neutral-200 shadow-2xs"
+                className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl text-black hover:bg-neutral-100 transition-all duration-150 cursor-pointer group flex items-center justify-center shrink-0 border border-neutral-200 shadow-2xs"
                 title="العودة لقائمة المقاييس"
                 aria-label="العودة"
               >
@@ -1924,7 +1924,7 @@ export default function App() {
                   strokeWidth="2.5" 
                   strokeLinecap="round" 
                   strokeLinejoin="round" 
-                  className="w-5 h-5 sm:w-[22px] sm:h-[22px] group-hover:translate-x-0.5 transition-transform"
+                  className="w-6 h-6 sm:w-7 sm:h-7 group-hover:translate-x-0.5 transition-transform"
                 >
                   <path d="M15 14l5-5-5-5" />
                   <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5v0A5.5 5.5 0 0 0 9.5 20H13" />
