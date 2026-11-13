@@ -5,8 +5,8 @@ import { defineConfig } from 'vite';
 
 export default defineConfig(() => {
   return {
-    // Support both AI Studio environment (root base '/') and GitHub Pages ('/ENS-medea/')
-    base: process.env.GITHUB_ACTIONS ? '/ENS-medea/' : '/',
+    // Support both AI Studio environment (root base '/') and GitHub Pages ('/ENS-medea3/')
+    base: process.env.GITHUB_ACTIONS ? '/ENS-medea3/' : '/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
