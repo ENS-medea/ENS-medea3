@@ -1677,7 +1677,7 @@ export default function App() {
                   isAdmin && (activeModule || isNewsView)
                     ? 'max-w-[140px] sm:max-w-none'
                     : 'max-w-[180px] sm:max-w-none'
-                } object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
+                } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
                 onError={(e) => {
                   (e.target as HTMLImageElement).src = NEW_LOGO_URL;
                 }}
