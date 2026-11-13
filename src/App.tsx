@@ -193,9 +193,10 @@ export default function App() {
   const [isNewsView, setIsNewsView] = useState<boolean>(initialNav.isNews);
   const [isSubmissionsView, setIsSubmissionsView] = useState<boolean>(initialNav.isSubmissions);
 
-  // Telegram In-App Browser detection
+  // Telegram In-App Browser detection & Download loading state
   const [isTelegramBrowser] = useState<boolean>(() => detectTelegramInAppBrowser());
   const isDownloadingInTelegramRef = useRef(false);
+  const [activeDownloadKeys, setActiveDownloadKeys] = useState<Record<string, boolean>>({});
 
   // Admin Authentication state
   const [isAdmin, setIsAdmin] = useState<boolean>(() => isCurrentAdminLoggedIn());
@@ -2087,17 +2088,28 @@ export default function App() {
   };
 
   // Download Trigger Utility (Supports regular browsers AND silent Telegram In-App Browser downloads)
-  const triggerDownload = async (url?: string, filename = 'document.pdf') => {
+  const triggerDownload = async (url?: string, filename = 'document.pdf', downloadKey?: string) => {
+    const trackingKey = downloadKey || url || filename;
+    setActiveDownloadKeys(prev => ({ ...prev, [trackingKey]: true }));
+
     if (!url || url === '#') {
-      const blob = new Blob([`ENS Medea Document: ${filename}`], { type: 'application/pdf' });
-      const blobUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = blobUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(blobUrl);
+      try {
+        const blob = new Blob([`ENS Medea Document: ${filename}`], { type: 'application/pdf' });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+      } finally {
+        setActiveDownloadKeys(prev => {
+          const next = { ...prev };
+          delete next[trackingKey];
+          return next;
+        });
+      }
       return;
     }
 
@@ -2223,6 +2235,11 @@ export default function App() {
       setTimeout(() => setAdminSuccessNotification(null), 3000);
     } finally {
       isDownloadingInTelegramRef.current = false;
+      setActiveDownloadKeys(prev => {
+        const next = { ...prev };
+        delete next[trackingKey];
+        return next;
+      });
     }
   };
 
@@ -2242,20 +2259,31 @@ export default function App() {
   }, [isTelegramBrowser]);
 
   // Multi-Image Sequential Download
-  const handleDownloadAllPostImages = async (images: AttachedImage[], postTitle: string) => {
+  const handleDownloadAllPostImages = async (images: AttachedImage[], postTitle: string, downloadKey?: string) => {
     if (!images || images.length === 0) return;
+
+    const bulkKey = downloadKey || `bulk_images:${postTitle}`;
+    setActiveDownloadKeys(prev => ({ ...prev, [bulkKey]: true }));
 
     setAdminSuccessNotification(`جاري تحميل كافة الصور (${images.length} صور)...`);
     setTimeout(() => setAdminSuccessNotification(null), 3000);
 
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      const safeTitle = (postTitle || 'image').slice(0, 20).replace(/\s+/g, '_');
-      const filename = img.name || `${safeTitle}_${i + 1}.jpg`;
-      await triggerDownload(img.url, filename);
-      if (i < images.length - 1) {
-        await new Promise(res => setTimeout(res, 350));
+    try {
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        const safeTitle = (postTitle || 'image').slice(0, 20).replace(/\s+/g, '_');
+        const filename = img.name || `${safeTitle}_${i + 1}.jpg`;
+        await triggerDownload(img.url, filename, `${bulkKey}:item:${i}`);
+        if (i < images.length - 1) {
+          await new Promise(res => setTimeout(res, 350));
+        }
       }
+    } finally {
+      setActiveDownloadKeys(prev => {
+        const next = { ...prev };
+        delete next[bulkKey];
+        return next;
+      });
     }
   };
 
@@ -3026,11 +3054,21 @@ export default function App() {
                                 </div>
                                 <button
                                   type="button"
-                                  onClick={() => triggerDownload(pdf.url, pdf.name)}
-                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-neutral-200 text-black text-xs font-semibold rounded-xl border border-neutral-300 cursor-pointer shrink-0"
+                                  disabled={Boolean(activeDownloadKeys[`inbox-pdf:${sub.id}:${pdf.id}`])}
+                                  onClick={() => triggerDownload(pdf.url, pdf.name, `inbox-pdf:${sub.id}:${pdf.id}`)}
+                                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-neutral-200 disabled:opacity-70 text-black text-xs font-semibold rounded-xl border border-neutral-300 cursor-pointer disabled:cursor-wait shrink-0"
                                 >
-                                  <Download className="w-3.5 h-3.5" />
-                                  <span>تحميل</span>
+                                  {activeDownloadKeys[`inbox-pdf:${sub.id}:${pdf.id}`] ? (
+                                    <>
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      <span>جاري التحميل...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Download className="w-3.5 h-3.5" />
+                                      <span>تحميل</span>
+                                    </>
+                                  )}
                                 </button>
                               </div>
                             ))}
@@ -3788,12 +3826,22 @@ export default function App() {
 
                               <button
                                 type="button"
-                                onClick={() => triggerDownload(pdf.url, pdf.name)}
-                                className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 bg-white hover:bg-neutral-200 text-black text-xs font-semibold rounded-xl border border-neutral-300 transition-colors shrink-0 shadow-2xs cursor-pointer"
+                                disabled={Boolean(activeDownloadKeys[`post-pdf:${lesson.id}:${pdf.id}`])}
+                                onClick={() => triggerDownload(pdf.url, pdf.name, `post-pdf:${lesson.id}:${pdf.id}`)}
+                                className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3.5 py-1.5 bg-white hover:bg-neutral-200 disabled:opacity-70 text-black text-xs font-semibold rounded-xl border border-neutral-300 transition-colors shrink-0 shadow-2xs cursor-pointer disabled:cursor-wait"
                                 title="تحميل الملف"
                               >
-                                <Download className="w-3.5 h-3.5" />
-                                <span>تحميل</span>
+                                {activeDownloadKeys[`post-pdf:${lesson.id}:${pdf.id}`] ? (
+                                  <>
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    <span>جاري التحميل...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Download className="w-3.5 h-3.5" />
+                                    <span>تحميل</span>
+                                  </>
+                                )}
                               </button>
                             </div>
                           ))}
@@ -3859,21 +3907,45 @@ export default function App() {
                           {(images.length > 0 || pdfs.length > 0) && (
                             <button
                               type="button"
-                              onClick={() => {
-                                if (images.length > 0) {
-                                  handleDownloadAllPostImages(images, lesson.title);
-                                }
-                                if (pdfs.length > 0) {
-                                  pdfs.forEach(p => triggerDownload(p.url, p.name));
+                              disabled={Boolean(activeDownloadKeys[`attachments:${lesson.id}`])}
+                              onClick={async () => {
+                                const attachKey = `attachments:${lesson.id}`;
+                                setActiveDownloadKeys(prev => ({ ...prev, [attachKey]: true }));
+                                try {
+                                  if (images.length > 0) {
+                                    await handleDownloadAllPostImages(images, lesson.title, `${attachKey}:imgs`);
+                                  }
+                                  if (pdfs.length > 0) {
+                                    for (let pIdx = 0; pIdx < pdfs.length; pIdx++) {
+                                      await triggerDownload(pdfs[pIdx].url, pdfs[pIdx].name, `${attachKey}:pdf:${pIdx}`);
+                                    }
+                                  }
+                                } finally {
+                                  setActiveDownloadKeys(prev => {
+                                    const next = { ...prev };
+                                    delete next[attachKey];
+                                    return next;
+                                  });
                                 }
                               }}
-                              className="flex items-center gap-1.5 text-neutral-500 hover:text-black transition-colors text-xs font-medium cursor-pointer"
+                              className="flex items-center gap-1.5 text-neutral-500 hover:text-black disabled:opacity-70 transition-colors text-xs font-medium cursor-pointer disabled:cursor-wait"
                               title={`تحميل كافة المرفقات (${images.length} صور, ${pdfs.length} ملفات)`}
                             >
-                              <Download className="w-5 h-5" />
-                              <span className="hidden sm:inline text-xs">
-                                تحميل المرفقات ({images.length + pdfs.length})
-                              </span>
+                              {activeDownloadKeys[`attachments:${lesson.id}`] ? (
+                                <>
+                                  <Loader2 className="w-5 h-5 animate-spin text-black" />
+                                  <span className="hidden sm:inline text-xs text-black font-semibold">
+                                    جاري التحميل...
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <Download className="w-5 h-5" />
+                                  <span className="hidden sm:inline text-xs">
+                                    تحميل المرفقات ({images.length + pdfs.length})
+                                  </span>
+                                </>
+                              )}
                             </button>
                           )}
                         </div>
@@ -4193,29 +4265,50 @@ export default function App() {
               {/* Individual Image Download */}
               <button
                 type="button"
+                disabled={Boolean(activeDownloadKeys[`lightbox-single:${lightboxIndex}`])}
                 onClick={() =>
                   triggerDownload(
                     lightboxImages[lightboxIndex]?.url,
-                    lightboxImages[lightboxIndex]?.name || `image_${lightboxIndex + 1}.jpg`
+                    lightboxImages[lightboxIndex]?.name || `image_${lightboxIndex + 1}.jpg`,
+                    `lightbox-single:${lightboxIndex}`
                   )
                 }
-                className="p-2 sm:p-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs flex items-center gap-1.5 transition-colors cursor-pointer border border-white/10"
+                className="p-2 sm:p-2.5 px-3 rounded-xl bg-white/10 hover:bg-white/20 disabled:opacity-75 text-white text-xs flex items-center gap-1.5 transition-colors cursor-pointer disabled:cursor-wait border border-white/10"
                 title="تحميل هذه الصورة"
               >
-                <Download className="w-4 h-4" />
-                <span className="hidden sm:inline">تحميل</span>
+                {activeDownloadKeys[`lightbox-single:${lightboxIndex}`] ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span className="hidden sm:inline">جاري التحميل...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    <span className="hidden sm:inline">تحميل</span>
+                  </>
+                )}
               </button>
 
               {/* Multi-Image Bulk Download */}
               {lightboxImages.length > 1 && (
                 <button
                   type="button"
-                  onClick={() => handleDownloadAllPostImages(lightboxImages, 'post_media')}
-                  className="p-2 sm:p-2.5 px-3 rounded-xl bg-white text-black hover:bg-neutral-200 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                  disabled={Boolean(activeDownloadKeys['lightbox-all'])}
+                  onClick={() => handleDownloadAllPostImages(lightboxImages, 'post_media', 'lightbox-all')}
+                  className="p-2 sm:p-2.5 px-3 rounded-xl bg-white text-black hover:bg-neutral-200 disabled:opacity-75 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:cursor-wait shadow-xs"
                   title="تحميل كافة الصور"
                 >
-                  <Download className="w-4 h-4" />
-                  <span className="hidden sm:inline">تحميل الكل ({lightboxImages.length})</span>
+                  {activeDownloadKeys['lightbox-all'] ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="hidden sm:inline">جاري التحميل...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4" />
+                      <span className="hidden sm:inline">تحميل الكل ({lightboxImages.length})</span>
+                    </>
+                  )}
                 </button>
               )}
 
