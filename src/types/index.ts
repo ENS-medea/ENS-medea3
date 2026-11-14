@@ -25,6 +25,20 @@ export interface CommentItem {
   isApproved?: boolean;
 }
 
+export type AutoLikesRateUnit = 'minute' | 'hour' | 'day';
+
+export interface AnnouncementBannerImage {
+  id: string;
+  url: string;
+  name: string;
+}
+
+export interface AnnouncementBannerConfig {
+  images: AnnouncementBannerImage[];
+  intervalSeconds: number;
+  enabled: boolean;
+}
+
 export interface LessonItem {
   id: string;
   moduleId?: string;
@@ -41,6 +55,12 @@ export interface LessonItem {
   autoLikesEnabled?: boolean;
   frozenAutoLikes?: number;
   autoLikesResumedAt?: number;
+  autoLikesMode?: 'default' | 'custom';
+  autoLikesCustomCount?: number;
+  autoLikesCustomInterval?: number;
+  autoLikesCustomUnit?: AutoLikesRateUnit;
+  autoLikesBaselineLikes?: number;
+  autoLikesBaselineAt?: number;
   likesServerShard?: 1 | 2;
   isLiked?: boolean;
   isPinned?: boolean;

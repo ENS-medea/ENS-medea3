@@ -116,6 +116,98 @@ export function simulateMinutesRange(
   return Math.max(0, total);
 }
 
+const MAX_CUSTOM_EXACT_STEPS = 1440;
+
+/**
+ * Simulates randomized, non-uniform custom-rate automated likes starting from `baselineAt`.
+ * - Jitters each interval's target count randomly around `countPerStep` so consecutive intervals
+ *   and multiple posts never produce identical or synchronized numbers.
+ * - Staggers individual like timestamps irregularly across the interval instead of jumping all at once.
+ */
+export function simulateCustomLikesRange(
+  postId: string,
+  baselineAt: number,
+  currentNow: number,
+  countPerStep: number,
+  intervalNum: number,
+  unit: 'minute' | 'hour' | 'day'
+): number {
+  if (countPerStep <= 0 || baselineAt <= 0 || currentNow <= baselineAt) {
+    return 0;
+  }
+
+  const unitMs = unit === 'day' ? 86400000 : unit === 'hour' ? 3600000 : 60000;
+  const stepMs = Math.max(60000, intervalNum * unitMs);
+  const elapsedMs = currentNow - baselineAt;
+  const currentStepIndex = Math.floor(elapsedMs / stepMs);
+
+  const baseHash = hashString(String(postId));
+  const baselineSeed = Math.floor(baselineAt / 1000) % 104729;
+
+  let total = 0;
+  let startStep = 0;
+
+  if (currentStepIndex > MAX_CUSTOM_EXACT_STEPS) {
+    const bulkSteps = currentStepIndex - MAX_CUSTOM_EXACT_STEPS;
+    const bulkJitter = 0.92 + seededRandom(baseHash + baselineSeed + 4099) * 0.16;
+    total += Math.max(0, Math.round(bulkSteps * countPerStep * bulkJitter));
+    startStep = bulkSteps;
+  }
+
+  for (let s = startStep; s <= currentStepIndex; s++) {
+    const stepStartMs = baselineAt + s * stepMs;
+    const stepSeed = baseHash + s * 7919 + baselineSeed * 131;
+
+    // Randomize step target (±35% around countPerStep) so steps & posts never look uniform
+    const jitterFactor = 0.65 + seededRandom(stepSeed + 17) * 0.70;
+    const rawStepFloat = countPerStep * jitterFactor;
+    const floorTarget = Math.floor(rawStepFloat);
+    const frac = rawStepFloat - floorTarget;
+    const stepTarget = floorTarget + (seededRandom(stepSeed + 31) < frac ? 1 : 0);
+
+    if (stepTarget <= 0) continue;
+
+    if (stepStartMs + stepMs <= currentNow) {
+      total += stepTarget;
+      continue;
+    }
+
+    if (stepTarget <= 120) {
+      for (let i = 0; i < stepTarget; i++) {
+        const r = seededRandom(stepSeed + (i + 1) * 3571);
+        const arrivalOffsetMs = 1000 + Math.floor(r * (stepMs - 1000));
+        if (stepStartMs + arrivalOffsetMs <= currentNow) {
+          total += 1;
+        }
+      }
+    } else {
+      const numSlices = 60;
+      const weights: number[] = [];
+      let weightSum = 0;
+      for (let k = 0; k < numSlices; k++) {
+        const w = 0.25 + seededRandom(stepSeed + (k + 1) * 997) * 1.5;
+        weights.push(w);
+        weightSum += w;
+      }
+      let allocated = 0;
+      for (let k = 0; k < numSlices; k++) {
+        const sliceRatio = (k + seededRandom(stepSeed + k * 53 + 7) * 0.85) / numSlices;
+        const sliceTime = stepStartMs + Math.floor(sliceRatio * stepMs);
+        const share =
+          k === numSlices - 1
+            ? Math.max(0, stepTarget - allocated)
+            : Math.min(stepTarget - allocated, Math.round((weights[k] / weightSum) * stepTarget));
+        allocated += share;
+        if (sliceTime <= currentNow) {
+          total += share;
+        }
+      }
+    }
+  }
+
+  return Math.max(0, total);
+}
+
 /**
  * Calculates ONLY the automated simulated portion of likes for a post.
  * Respects Admin pause/resume state:
@@ -133,6 +225,31 @@ export function getSimulatedAutoLikesOnly(lesson: LessonItem, currentNow = Date.
   // If Admin stopped automated likes on this post, freeze automated growth completely
   if (lesson.autoLikesEnabled === false) {
     return typeof lesson.frozenAutoLikes === 'number' ? Math.max(0, lesson.frozenAutoLikes) : 0;
+  }
+
+  // Per-post Admin custom growth rate (randomized non-uniform distribution around X likes per Y minutes/hours/days)
+  if (lesson.autoLikesMode === 'custom') {
+    const base =
+      typeof lesson.autoLikesBaselineLikes === 'number'
+        ? Math.max(0, lesson.autoLikesBaselineLikes)
+        : 0;
+    const baselineAt =
+      typeof lesson.autoLikesBaselineAt === 'number' && lesson.autoLikesBaselineAt > 0
+        ? lesson.autoLikesBaselineAt
+        : postTimestamp;
+    const countPerStep = Math.max(0, Number(lesson.autoLikesCustomCount) || 0);
+    const intervalNum = Math.max(1, Number(lesson.autoLikesCustomInterval) || 1);
+    const unit = lesson.autoLikesCustomUnit || 'minute';
+
+    const randomizedDelta = simulateCustomLikesRange(
+      lesson.id,
+      baselineAt,
+      currentNow,
+      countPerStep,
+      intervalNum,
+      unit
+    );
+    return base + randomizedDelta;
   }
 
   // If Admin previously paused and later resumed, accumulate from resume time on top of frozen snapshot

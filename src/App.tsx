@@ -29,9 +29,22 @@ import {
   Bell,
   BellRing,
   BellOff,
-  Inbox
+  Inbox,
+  SlidersHorizontal,
+  Megaphone
 } from 'lucide-react';
-import { AttachedImage, AttachedPdf, CommentItem, LessonItem, ModuleItem, SpecializationItem, StudentSubmissionItem } from './types';
+import {
+  AttachedImage,
+  AttachedPdf,
+  CommentItem,
+  LessonItem,
+  ModuleItem,
+  SpecializationItem,
+  StudentSubmissionItem,
+  AnnouncementBannerConfig,
+  AnnouncementBannerImage,
+  AutoLikesRateUnit
+} from './types';
 import logoAsset from './assets/logo.png';
 import avatarAsset from './assets/avatar.jpg';
 import { 
@@ -67,7 +80,9 @@ import {
   subscribeStudentSubmissions,
   addStudentSubmissionToFirestore,
   markStudentSubmissionReadInFirestore,
-  deleteStudentSubmissionFromFirestore
+  deleteStudentSubmissionFromFirestore,
+  subscribeAnnouncementBanner,
+  saveAnnouncementBannerToFirestore
 } from './services/firebase';
 import { CloudImage } from './components/CloudImage';
 import { 
@@ -354,6 +369,15 @@ export default function App() {
     return () => unsubSpecs();
   }, []);
 
+  // Scroll strictly to top whenever entering/switching a Module page, News view, or Submissions view
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
+  }, [activeModuleId, isNewsView, isSubmissionsView]);
+
   // Real-time Firebase Firestore Subscription for Modules, Admin News Posts & Student Submissions
   useEffect(() => {
     const processLessonsList = (incLessons: LessonItem[], now: number): LessonItem[] => {
@@ -413,11 +437,16 @@ export default function App() {
       setIsSubmissionsLoaded(true);
     });
 
+    const unsubBanner = subscribeAnnouncementBanner((config) => {
+      setBannerConfig(config);
+    });
+
     return () => {
       unsubYear1();
       unsubYear2();
       unsubNews();
       unsubSubmissions();
+      unsubBanner();
     };
   }, []);
 
@@ -536,7 +565,11 @@ export default function App() {
   const [newLessonTitle, setNewLessonTitle] = useState('');
   const [newLessonType, setNewLessonType] = useState('');
   const [newLessonDescription, setNewLessonDescription] = useState('');
-  const [newLessonCommentsEnabled, setNewLessonCommentsEnabled] = useState(true);
+  const [newLessonCommentsEnabled, setNewLessonCommentsEnabled] = useState(false);
+  const [newAutoLikesMode, setNewAutoLikesMode] = useState<'default' | 'custom'>('default');
+  const [newAutoLikesCount, setNewAutoLikesCount] = useState<number>(5);
+  const [newAutoLikesInterval, setNewAutoLikesInterval] = useState<number>(1);
+  const [newAutoLikesUnit, setNewAutoLikesUnit] = useState<AutoLikesRateUnit>('hour');
   
   const [newLessonDate, setNewLessonDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [newLessonTime, setNewLessonTime] = useState(() => getTimeInputFromTimestamp(Date.now()));
@@ -556,9 +589,13 @@ export default function App() {
   // Edit Lesson state (Admin only)
   const [editingLesson, setEditingLesson] = useState<LessonItem | null>(null);
   const [editLessonTitle, setEditLessonTitle] = useState('');
-  const [editLessonType, setEditLessonType] = useState('محاضرة');
+  const [editLessonType, setEditLessonType] = useState('Cour');
   const [editLessonDescription, setEditLessonDescription] = useState('');
   const [editLessonCommentsEnabled, setEditLessonCommentsEnabled] = useState(true);
+  const [editAutoLikesMode, setEditAutoLikesMode] = useState<'default' | 'custom'>('default');
+  const [editAutoLikesCount, setEditAutoLikesCount] = useState<number>(5);
+  const [editAutoLikesInterval, setEditAutoLikesInterval] = useState<number>(1);
+  const [editAutoLikesUnit, setEditAutoLikesUnit] = useState<AutoLikesRateUnit>('hour');
   const [editLessonDate, setEditLessonDate] = useState('');
   const [editLessonTime, setEditLessonTime] = useState('12:00');
   const [editStagedImages, setEditStagedImages] = useState<AttachedImage[]>([]);
@@ -569,6 +606,51 @@ export default function App() {
   const [editLessonUploadError, setEditLessonUploadError] = useState<string | null>(null);
   const editLessonTitleInputRef = useRef<HTMLInputElement>(null);
   const editLessonDescRef = useRef<HTMLTextAreaElement>(null);
+
+  // Announcement Banner state & Admin editor
+  const [bannerConfig, setBannerConfig] = useState<AnnouncementBannerConfig>({
+    images: [],
+    intervalSeconds: 4,
+    enabled: true,
+  });
+  const [bannerSlideIndex, setBannerSlideIndex] = useState(0);
+  const [isBannerAdminModalOpen, setIsBannerAdminModalOpen] = useState(false);
+  const [draftBannerImages, setDraftBannerImages] = useState<AnnouncementBannerImage[]>([]);
+  const [draftBannerInterval, setDraftBannerInterval] = useState<number>(4);
+  const [draftBannerEnabled, setDraftBannerEnabled] = useState<boolean>(true);
+  const [isUploadingBannerImage, setIsUploadingBannerImage] = useState(false);
+  const [isSavingBanner, setIsSavingBanner] = useState(false);
+  const [bannerError, setBannerError] = useState<string | null>(null);
+
+  // Per-post & Multi-post Likes Rate & Count Modal (Admin only)
+  const [likesControlLesson, setLikesControlLesson] = useState<LessonItem | null>(null);
+  const [selectedLikesPostIds, setSelectedLikesPostIds] = useState<string[]>([]);
+  const [ctrlLikesDelta, setCtrlLikesDelta] = useState<number>(0);
+  const [ctrlLikesMode, setCtrlLikesMode] = useState<'default' | 'custom'>('default');
+  const [ctrlLikesCount, setCtrlLikesCount] = useState<number>(5);
+  const [ctrlLikesInterval, setCtrlLikesInterval] = useState<number>(1);
+  const [ctrlLikesUnit, setCtrlLikesUnit] = useState<AutoLikesRateUnit>('hour');
+  const [ctrlLikesEnabled, setCtrlLikesEnabled] = useState<boolean>(true);
+  const [isSavingLikesRate, setIsSavingLikesRate] = useState(false);
+
+  // Auto-rotate Announcement Banner images based on Admin-configured interval
+  useEffect(() => {
+    const count = bannerConfig.images.length;
+    if (count === 0) {
+      setBannerSlideIndex(0);
+      return;
+    }
+    if (bannerSlideIndex >= count) {
+      setBannerSlideIndex(0);
+    }
+    if (count <= 1 || !bannerConfig.enabled) return;
+
+    const ms = Math.max(1, Number(bannerConfig.intervalSeconds) || 4) * 1000;
+    const timer = setInterval(() => {
+      setBannerSlideIndex(prev => (prev + 1) % count);
+    }, ms);
+    return () => clearInterval(timer);
+  }, [bannerConfig.images.length, bannerConfig.intervalSeconds, bannerConfig.enabled, bannerSlideIndex]);
 
   // Periodic Automated Like Growth Sync (every 15 seconds)
   // Safely skipped while Admin is adding/editing/mutating lessons to guarantee zero race conditions!
@@ -673,6 +755,10 @@ export default function App() {
           setLightboxImages(null);
         } else if (commentsModalLesson) {
           setCommentsModalLesson(null);
+        } else if (likesControlLesson) {
+          setLikesControlLesson(null);
+        } else if (isBannerAdminModalOpen) {
+          setIsBannerAdminModalOpen(false);
         } else if (editingLesson) {
           setEditingLesson(null);
         } else if (editingModule) {
@@ -710,8 +796,6 @@ export default function App() {
       setAdminPasswordInput('');
 
       if (isAdmin) {
-        setAdminSuccessNotification('أنت مسجل حالياً كمسؤول المنصة');
-        setTimeout(() => setAdminSuccessNotification(null), 3000);
         return;
       }
 
@@ -744,8 +828,6 @@ export default function App() {
       await createSingleAdminAccount(adminUsernameInput, adminPasswordInput);
       setIsAdmin(true);
       setIsAdminSetupModalOpen(false);
-      setAdminSuccessNotification('تم إنشاء وتفعيل حساب المسؤول الرئيسي بنجاح');
-      setTimeout(() => setAdminSuccessNotification(null), 3500);
     } catch (err: any) {
       setAdminAuthError(err.message || 'حدث خطأ أثناء إنشاء حساب المسؤول');
     } finally {
@@ -769,8 +851,6 @@ export default function App() {
       if (isValid) {
         setIsAdmin(true);
         setIsAdminLoginModalOpen(false);
-        setAdminSuccessNotification('تم تسجيل دخول المسؤول بنجاح');
-        setTimeout(() => setAdminSuccessNotification(null), 3500);
       } else {
         setAdminAuthError('بيانات الدخول غير صحيحة. يرجى التحقق وإعادة المحاولة.');
       }
@@ -784,8 +864,6 @@ export default function App() {
   const handleAdminLogout = () => {
     logoutAdmin();
     setIsAdmin(false);
-    setAdminSuccessNotification('تم قفل وضع المسؤول والعودة للوضع العادي');
-    setTimeout(() => setAdminSuccessNotification(null), 3000);
   };
 
   const currentModules = (selectedYear === 'first' ? year1Modules : year2Modules)
@@ -849,6 +927,12 @@ export default function App() {
           autoLikesEnabled: typeof shardState.autoLikesEnabled === 'boolean' ? shardState.autoLikesEnabled : l.autoLikesEnabled,
           frozenAutoLikes: typeof shardState.frozenAutoLikes === 'number' ? shardState.frozenAutoLikes : l.frozenAutoLikes,
           autoLikesResumedAt: typeof shardState.autoLikesResumedAt === 'number' ? shardState.autoLikesResumedAt : l.autoLikesResumedAt,
+          autoLikesMode: shardState.autoLikesMode || l.autoLikesMode,
+          autoLikesCustomCount: typeof shardState.autoLikesCustomCount === 'number' ? shardState.autoLikesCustomCount : l.autoLikesCustomCount,
+          autoLikesCustomInterval: typeof shardState.autoLikesCustomInterval === 'number' ? shardState.autoLikesCustomInterval : l.autoLikesCustomInterval,
+          autoLikesCustomUnit: shardState.autoLikesCustomUnit || l.autoLikesCustomUnit,
+          autoLikesBaselineLikes: typeof shardState.autoLikesBaselineLikes === 'number' ? shardState.autoLikesBaselineLikes : l.autoLikesBaselineLikes,
+          autoLikesBaselineAt: typeof shardState.autoLikesBaselineAt === 'number' ? shardState.autoLikesBaselineAt : l.autoLikesBaselineAt,
           likesServerShard: shardState.serverShard || l.likesServerShard,
         };
         const recalculated = calculateAutomatedLikes(mergedLesson, now);
@@ -861,6 +945,10 @@ export default function App() {
           mergedLesson.manualLikesOffset !== l.manualLikesOffset ||
           mergedLesson.autoLikesEnabled !== l.autoLikesEnabled ||
           mergedLesson.frozenAutoLikes !== l.frozenAutoLikes ||
+          mergedLesson.autoLikesMode !== l.autoLikesMode ||
+          mergedLesson.autoLikesCustomCount !== l.autoLikesCustomCount ||
+          mergedLesson.autoLikesCustomInterval !== l.autoLikesCustomInterval ||
+          mergedLesson.autoLikesCustomUnit !== l.autoLikesCustomUnit ||
           nextLikesCount !== l.likesCount
         ) {
           return { item: { ...mergedLesson, likesCount: nextLikesCount }, changed: true };
@@ -1245,7 +1333,11 @@ export default function App() {
     setNewLessonTitle('');
     setNewLessonDescription('');
     setNewLessonType('');
-    setNewLessonCommentsEnabled(true);
+    setNewLessonCommentsEnabled(false);
+    setNewAutoLikesMode('default');
+    setNewAutoLikesCount(5);
+    setNewAutoLikesInterval(1);
+    setNewAutoLikesUnit('hour');
     setNewLessonDate(new Date().toISOString().split('T')[0]);
     setNewLessonTime(getTimeInputFromTimestamp(Date.now()));
     setStagedImages([]);
@@ -1407,6 +1499,12 @@ export default function App() {
         userLikes: 0,
         autoLikesEnabled: true,
         frozenAutoLikes: 0,
+        autoLikesMode: newAutoLikesMode,
+        autoLikesCustomCount: Math.max(0, Number(newAutoLikesCount) || 0),
+        autoLikesCustomInterval: Math.max(1, Number(newAutoLikesInterval) || 1),
+        autoLikesCustomUnit: newAutoLikesUnit,
+        autoLikesBaselineLikes: 0,
+        autoLikesBaselineAt: chosenTimestamp,
         likesServerShard: assignedShard,
         isLiked: false,
         isPinned: false,
@@ -1443,7 +1541,11 @@ export default function App() {
       // Clean up form state and close modal cleanly
       setNewLessonTitle('');
       setNewLessonDescription('');
-      setNewLessonCommentsEnabled(true);
+      setNewLessonCommentsEnabled(false);
+      setNewAutoLikesMode('default');
+      setNewAutoLikesCount(5);
+      setNewAutoLikesInterval(1);
+      setNewAutoLikesUnit('hour');
       setNewLessonDate(new Date().toISOString().split('T')[0]);
       setNewLessonTime(getTimeInputFromTimestamp(Date.now()));
       setStagedImages([]);
@@ -1573,9 +1675,17 @@ export default function App() {
     if (!isAdmin) return;
     setEditingLesson(lesson);
     setEditLessonTitle(lesson.title || '');
-    setEditLessonType(lesson.type || 'محاضرة');
+    setEditLessonType(
+      isNewsView
+        ? (lesson.type || 'خبر هام')
+        : (['Cour', 'TD', 'تمارين'].includes(lesson.type) ? lesson.type : 'Cour')
+    );
     setEditLessonDescription(lesson.description || '');
     setEditLessonCommentsEnabled(lesson.commentsEnabled !== false);
+    setEditAutoLikesMode(lesson.autoLikesMode === 'custom' ? 'custom' : 'default');
+    setEditAutoLikesCount(typeof lesson.autoLikesCustomCount === 'number' ? lesson.autoLikesCustomCount : 5);
+    setEditAutoLikesInterval(typeof lesson.autoLikesCustomInterval === 'number' ? Math.max(1, lesson.autoLikesCustomInterval) : 1);
+    setEditAutoLikesUnit(lesson.autoLikesCustomUnit || 'hour');
     setEditStagedImages([...(lesson.images || [])]);
     setEditStagedPdfs([...(lesson.pdfs || [])]);
     setEditLessonUploadError(null);
@@ -1706,8 +1816,16 @@ export default function App() {
           activeFeedLessons
         );
 
+    const nowMs = Date.now();
     const updatedLessons = latestFeed.map(l => {
       if (String(l.id) === editIdStr) {
+        const currentAuto = getSimulatedAutoLikesOnly(l, nowMs);
+        const rateChanged =
+          editAutoLikesMode !== (l.autoLikesMode || 'default') ||
+          editAutoLikesCount !== (l.autoLikesCustomCount ?? 5) ||
+          editAutoLikesInterval !== (l.autoLikesCustomInterval ?? 1) ||
+          editAutoLikesUnit !== (l.autoLikesCustomUnit || 'hour');
+
         return {
           ...l,
           title: trimmedTitle,
@@ -1718,6 +1836,14 @@ export default function App() {
           pdfs: editStagedPdfs,
           createdAt: chosenDateText,
           timestamp: chosenTimestamp,
+          autoLikesMode: editAutoLikesMode,
+          autoLikesCustomCount: Math.max(0, Number(editAutoLikesCount) || 0),
+          autoLikesCustomInterval: Math.max(1, Number(editAutoLikesInterval) || 1),
+          autoLikesCustomUnit: editAutoLikesUnit,
+          autoLikesBaselineLikes: rateChanged ? currentAuto : l.autoLikesBaselineLikes,
+          autoLikesBaselineAt: rateChanged ? nowMs : l.autoLikesBaselineAt,
+          frozenAutoLikes: rateChanged && editAutoLikesMode === 'default' ? currentAuto : l.frozenAutoLikes,
+          autoLikesResumedAt: rateChanged && editAutoLikesMode === 'default' ? nowMs : l.autoLikesResumedAt,
         };
       }
       return l;
@@ -1919,7 +2045,9 @@ export default function App() {
             autoLikesEnabled: true,
             frozenAutoLikes: frozenSnap,
             autoLikesResumedAt: now,
-            likesCount: frozenSnap + realUserLikes,
+            autoLikesBaselineLikes: l.autoLikesMode === 'custom' ? frozenSnap : l.autoLikesBaselineLikes,
+            autoLikesBaselineAt: l.autoLikesMode === 'custom' ? now : l.autoLikesBaselineAt,
+            likesCount: frozenSnap + realUserLikes + (typeof l.manualLikesOffset === 'number' ? l.manualLikesOffset : 0),
           };
           return changedLesson;
         }
@@ -1938,6 +2066,161 @@ export default function App() {
         : 'تم إيقاف الإعجابات المولدة آلياً (الإعجابات الحقيقية تبقى مستمرة)'
     );
     setTimeout(() => setAdminSuccessNotification(null), 3500);
+  };
+
+  // Open & Save Single or Multi-Post Likes Rate & Amount Control Modal (Admin only)
+  const handleOpenLikesControlModal = (lesson: LessonItem, initialIds?: string[]) => {
+    if (!isAdmin) return;
+    setLikesControlLesson(lesson);
+    setSelectedLikesPostIds(
+      initialIds && initialIds.length > 0 ? initialIds.map(String) : [String(lesson.id)]
+    );
+    setCtrlLikesDelta(0);
+    setCtrlLikesEnabled(lesson.autoLikesEnabled !== false);
+    setCtrlLikesMode(lesson.autoLikesMode === 'custom' ? 'custom' : 'default');
+    setCtrlLikesCount(typeof lesson.autoLikesCustomCount === 'number' ? lesson.autoLikesCustomCount : 5);
+    setCtrlLikesInterval(typeof lesson.autoLikesCustomInterval === 'number' ? Math.max(1, lesson.autoLikesCustomInterval) : 1);
+    setCtrlLikesUnit(lesson.autoLikesCustomUnit || 'hour');
+  };
+
+  const handleSavePostLikesRate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (
+      !isAdmin ||
+      !likesControlLesson ||
+      selectedLikesPostIds.length === 0 ||
+      (!activeModuleId && !isNewsView) ||
+      isSavingLikesRate
+    ) {
+      return;
+    }
+
+    setIsSavingLikesRate(true);
+    isMutatingLessonsRef.current = true;
+    const now = Date.now();
+    const targetIdSet = new Set(selectedLikesPostIds.map(String));
+    const updatedLessonRefs: LessonItem[] = [];
+
+    try {
+      const currentFeed = isNewsView
+        ? adminNewsPostsRef.current
+        : (
+            year1ModulesRef.current.find(m => String(m.id) === String(activeModuleId))?.lessons ||
+            year2ModulesRef.current.find(m => String(m.id) === String(activeModuleId))?.lessons ||
+            activeFeedLessons
+          );
+
+      const updatedLessons = currentFeed.map(l => {
+        if (targetIdSet.has(String(l.id))) {
+          const currentAuto = getSimulatedAutoLikesOnly(l, now);
+          const realLikes = typeof l.userLikes === 'number' ? Math.max(0, l.userLikes) : (l.isLiked ? 1 : 0);
+          const prevManual = typeof l.manualLikesOffset === 'number' ? l.manualLikesOffset : 0;
+          const hasManualChange = ctrlLikesDelta !== 0 || typeof l.manualLikesOffset === 'number';
+          const nextManual = Math.max(-(currentAuto + realLikes), prevManual + ctrlLikesDelta);
+          const preservedTotal = Math.max(
+            0,
+            currentAuto + realLikes + (hasManualChange ? nextManual : 0)
+          );
+
+          const nextLesson: LessonItem = {
+            ...l,
+            ...(hasManualChange ? { manualLikesOffset: nextManual } : {}),
+            autoLikesEnabled: ctrlLikesEnabled,
+            autoLikesMode: ctrlLikesMode,
+            autoLikesCustomCount: Math.max(0, Number(ctrlLikesCount) || 0),
+            autoLikesCustomInterval: Math.max(1, Number(ctrlLikesInterval) || 1),
+            autoLikesCustomUnit: ctrlLikesUnit,
+            autoLikesBaselineLikes: currentAuto,
+            autoLikesBaselineAt: now,
+            frozenAutoLikes: currentAuto,
+            autoLikesResumedAt: now,
+            likesCount: preservedTotal,
+          };
+          updatedLessonRefs.push(nextLesson);
+          return nextLesson;
+        }
+        return l;
+      });
+
+      await syncModuleLessons(updatedLessons, true);
+      if (updatedLessonRefs.length > 0) {
+        await Promise.all(
+          updatedLessonRefs.map(updatedRef => syncLessonLikesToShard(updatedRef).catch(() => {}))
+        );
+      }
+
+      setLikesControlLesson(null);
+      setSelectedLikesPostIds([]);
+      setCtrlLikesDelta(0);
+      setAdminSuccessNotification(
+        updatedLessonRefs.length > 1
+          ? `تم تطبيق إعدادات التفاعلات على ${updatedLessonRefs.length} منشورات بنجاح`
+          : 'تم حفظ إعدادات ومعدل الإعجابات بنجاح'
+      );
+      setTimeout(() => setAdminSuccessNotification(null), 3000);
+    } finally {
+      isMutatingLessonsRef.current = false;
+      setIsSavingLikesRate(false);
+    }
+  };
+
+  // Announcement Banner Admin Handlers
+  const handleOpenBannerAdminModal = () => {
+    if (!isAdmin) return;
+    setDraftBannerImages([...(bannerConfig.images || [])]);
+    setDraftBannerInterval(Math.max(1, Number(bannerConfig.intervalSeconds) || 4));
+    setDraftBannerEnabled(bannerConfig.enabled !== false);
+    setBannerError(null);
+    setIsBannerAdminModalOpen(true);
+  };
+
+  const handleBannerImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    setIsUploadingBannerImage(true);
+    setBannerError(null);
+    try {
+      for (const file of files) {
+        try {
+          const url = await uploadImageToImgBB(file);
+          if (url) {
+            setDraftBannerImages(prev => [
+              ...prev,
+              { id: `ad_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, url, name: file.name || 'إعلان' },
+            ]);
+          }
+        } catch (err: any) {
+          setBannerError(err?.message || `فشل رفع الصورة (${file.name})`);
+        }
+      }
+    } finally {
+      setIsUploadingBannerImage(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleSaveBannerConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || isSavingBanner) return;
+    setIsSavingBanner(true);
+    setBannerError(null);
+    try {
+      const nextConfig: AnnouncementBannerConfig = {
+        images: draftBannerImages,
+        intervalSeconds: Math.max(1, Math.min(120, Number(draftBannerInterval) || 4)),
+        enabled: draftBannerEnabled,
+      };
+      await saveAnnouncementBannerToFirestore(nextConfig);
+      setBannerConfig(nextConfig);
+      setIsBannerAdminModalOpen(false);
+      setAdminSuccessNotification('تم حفظ إعدادات شريط الإعلانات بنجاح');
+      setTimeout(() => setAdminSuccessNotification(null), 3000);
+    } catch (err: any) {
+      setBannerError(err?.message || 'حدث خطأ أثناء حفظ شريط الإعلانات');
+    } finally {
+      setIsSavingBanner(false);
+    }
   };
 
   // Toggle Real User Like on Lesson / News Post (Open to all users; works whether auto-likes are active or paused)
@@ -2353,34 +2636,40 @@ export default function App() {
   });
 
   return (
-    <div className="min-h-screen w-full overflow-x-hidden bg-white text-black font-['Cairo',sans-serif] selection:bg-black selection:text-white">
+    <div className="min-h-screen w-full overflow-x-clip bg-white text-black font-['Cairo',sans-serif] selection:bg-black selection:text-white">
       
-      {/* 1. Top Header Bar: Compact height with clear logo & icons */}
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-neutral-200 min-h-[64px] sm:min-h-[74px] shadow-2xs w-full">
-        <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-1.5 sm:gap-3 h-[64px] sm:h-[74px] px-2.5 sm:px-6">
+      {/* 1. Top Header Bar: Solid white sticky bar with clear icons & logo */}
+      <header className="sticky top-0 z-40 bg-white border-b border-neutral-200 h-[64px] sm:h-[74px] shadow-2xs w-full">
+        <div
+          className={`w-full max-w-7xl mx-auto flex items-center ${
+            isAdmin && (activeModule || isNewsView) ? 'justify-end' : 'justify-between'
+          } gap-1.5 sm:gap-3 h-[64px] sm:h-[74px] px-2.5 sm:px-6`}
+        >
           
-          {/* Far Left Side: App Logo / Name */}
-          <div className="flex items-center h-full shrink-0" dir="ltr">
-            {/* Logo Image (7-Tap Hidden Trigger: COMPLETELY SILENT AND INVISIBLE) */}
-            <div 
-              onClick={handleLogoTap}
-              className="flex items-center justify-center cursor-pointer select-none group relative h-full py-0"
-              title="ENS Medea"
-            >
-              <img 
-                src={logoAsset} 
-                alt="ENS Medea Logo" 
-                className={`h-[52px] sm:h-[62px] md:h-[66px] w-auto ${
-                  isAdmin && (activeModule || isNewsView || isSubmissionsView)
-                    ? 'max-w-[100px] sm:max-w-none'
-                    : 'max-w-[140px] sm:max-w-none'
-                } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).src = NEW_LOGO_URL;
-                }}
-              />
+          {/* Far Left Side: App Logo / Name (Hidden for Admin inside Lessons & News pages) */}
+          {!(isAdmin && (activeModule || isNewsView)) && (
+            <div className="flex items-center h-full shrink-0" dir="ltr">
+              {/* Logo Image (7-Tap Hidden Trigger: COMPLETELY SILENT AND INVISIBLE) */}
+              <div 
+                onClick={handleLogoTap}
+                className="flex items-center justify-center cursor-pointer select-none group relative h-full py-0"
+                title="ENS Medea"
+              >
+                <img 
+                  src={logoAsset} 
+                  alt="ENS Medea Logo" 
+                  className={`h-[52px] sm:h-[62px] md:h-[66px] w-auto ${
+                    isAdmin && isSubmissionsView
+                      ? 'max-w-[100px] sm:max-w-none'
+                      : 'max-w-[140px] sm:max-w-none'
+                  } mr-0 ml-0 mt-0 -mb-[5px] pt-0 pb-0 pr-[-80px] pl-[-100px] object-contain transition-transform duration-200 active:scale-95 hover:opacity-95 rounded-sm`}
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = NEW_LOGO_URL;
+                  }}
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Far Right Side: Send-to-Admin (Black Cube w/ White Icon), Home, Search, Back & Admin Actions */}
           <div className="flex items-center gap-1 sm:gap-2 min-w-0 justify-end" dir="rtl">
@@ -2674,6 +2963,82 @@ export default function App() {
               </div>
             </div>
 
+            {/* 2. AUTO-ROTATING ANNOUNCEMENT BANNER (Centered exactly between Year Buttons and Modules Grid) */}
+            {bannerConfig.enabled && bannerConfig.images.length > 0 ? (
+              <div className="w-full max-w-2xl mx-auto px-1">
+                <div
+                  className="relative w-full aspect-[16/7] sm:aspect-[16/6] rounded-2xl sm:rounded-3xl overflow-hidden border border-neutral-200 bg-neutral-100 shadow-2xs select-none no-save-media"
+                  onContextMenu={(e) => e.preventDefault()}
+                  onDragStart={(e) => e.preventDefault()}
+                >
+                  {bannerConfig.images.map((img, idx) => (
+                    <CloudImage
+                      key={img.id}
+                      src={img.url}
+                      alt={img.name || 'إعلان'}
+                      draggable={false}
+                      referrerPolicy="no-referrer"
+                      onContextMenu={(e) => e.preventDefault()}
+                      onDragStart={(e) => e.preventDefault()}
+                      className={`absolute inset-0 w-full h-full object-cover pointer-events-none select-none no-save-media transition-opacity duration-500 ${
+                        idx === bannerSlideIndex ? 'opacity-100' : 'opacity-0'
+                      }`}
+                    />
+                  ))}
+
+                  {/* Full-coverage transparent interaction shield preventing student long-press/save/context-menu */}
+                  <div
+                    className="absolute inset-0 z-10 no-save-media"
+                    onContextMenu={(e) => e.preventDefault()}
+                    onDragStart={(e) => e.preventDefault()}
+                  />
+
+                  {/* Subtle slide indicators */}
+                  {bannerConfig.images.length > 1 && (
+                    <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 z-15 flex items-center gap-1.5 pointer-events-none">
+                      {bannerConfig.images.map((img, idx) => (
+                        <span
+                          key={img.id}
+                          className={`h-1.5 rounded-full transition-all duration-300 ${
+                            idx === bannerSlideIndex ? 'w-5 bg-white shadow-xs' : 'w-1.5 bg-white/55'
+                          }`}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Admin-only quick configure trigger */}
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={handleOpenBannerAdminModal}
+                      className="absolute top-2.5 left-2.5 z-20 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-black/80 hover:bg-black text-white text-[11px] font-semibold backdrop-blur-xs border border-white/20 transition-colors cursor-pointer"
+                      title="إدارة صور ومدة شريط الإعلانات"
+                    >
+                      <Megaphone className="w-3.5 h-3.5" />
+                      <span>إدارة الإعلانات ({bannerConfig.intervalSeconds}ث)</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : isAdmin ? (
+              <div className="w-full max-w-2xl mx-auto px-1">
+                <button
+                  type="button"
+                  onClick={handleOpenBannerAdminModal}
+                  className="w-full py-5 px-4 rounded-2xl sm:rounded-3xl border border-dashed border-neutral-300 bg-neutral-50 hover:bg-neutral-100 text-center flex flex-col items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Megaphone className="w-5 h-5 text-black" />
+                  <span className="text-xs sm:text-sm font-bold text-black">
+                    شريط الإعلانات التلقائي (اضغط لإضافة صور وتحديد المدة)
+                  </span>
+                  <span className="text-[11px] text-neutral-500">
+                    يظهر هنا بين أزرار السنوات وشبكة المقاييس فور إضافة الصور
+                  </span>
+                </button>
+              </div>
+            ) : null}
+
             {/* Section Header: PEP arabe & Telegram Group Link */}
             <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-neutral-200">
               <h2 className="text-base sm:text-lg font-bold text-black font-sans">
@@ -2732,6 +3097,15 @@ export default function App() {
 
                   <button
                     type="button"
+                    onClick={handleOpenBannerAdminModal}
+                    className="flex-1 sm:flex-none inline-flex items-center justify-center gap-1.5 px-3.5 py-2 bg-neutral-100 hover:bg-neutral-200 text-black border border-neutral-300 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    <Megaphone className="w-3.5 h-3.5" />
+                    <span>شريط الإعلانات</span>
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => {
                       setIsNewsView(true);
                       setActiveModuleId(null);
@@ -2775,7 +3149,7 @@ export default function App() {
                 <div className="w-full h-56 bg-neutral-50/50 rounded-3xl border border-neutral-200" />
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <div className="grid grid-cols-2 gap-3 sm:gap-5 lg:gap-6">
                 {currentModules.map((mod, index) => {
                   const hasCover = Boolean(mod.thumbnailUrl);
 
@@ -2785,7 +3159,7 @@ export default function App() {
                       <div
                         key={mod.id}
                         onClick={() => setActiveModuleId(mod.id)}
-                        className="group relative rounded-3xl overflow-hidden min-h-[220px] sm:min-h-[240px] flex flex-col justify-between p-6 shadow-2xs hover:shadow-lg transition-all duration-300 cursor-pointer border border-neutral-200"
+                        className="group relative rounded-2xl sm:rounded-3xl overflow-hidden min-h-[165px] sm:min-h-[225px] flex flex-col justify-between p-3.5 sm:p-6 shadow-2xs hover:shadow-md transition-transform duration-200 active:scale-[0.99] cursor-pointer border border-neutral-200 transform-gpu"
                       >
                         {/* Background image filling the entire card (Optimized with CloudImage) */}
                         <CloudImage 
@@ -2793,55 +3167,47 @@ export default function App() {
                           alt={mod.name} 
                           loading="lazy"
                           decoding="async"
-                          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 will-change-transform"
+                          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         />
                         {/* High-contrast gradient overlay ensuring crystal-clear text readability */}
                         <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/55 to-black/30 group-hover:from-black/95 transition-colors" />
 
                         {/* Top Row: Index Badge + Admin Edit/Delete Actions */}
-                        <div className="relative z-10 flex items-start justify-between gap-4">
-                          <span className="w-8 h-8 rounded-xl bg-white/20 backdrop-blur-md text-white font-mono text-xs font-bold flex items-center justify-center border border-white/30">
+                        <div className="relative z-10 flex items-start justify-between gap-2">
+                          <span className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl bg-white/20 backdrop-blur-xs text-white font-mono text-[11px] sm:text-xs font-bold flex items-center justify-center border border-white/30 tabular-nums">
                             {index + 1}
                           </span>
 
                           {isAdmin && (
                             <div 
-                              className="flex items-center gap-1 bg-black/50 backdrop-blur-md p-1 rounded-xl border border-white/20" 
+                              className="flex items-center gap-0.5 sm:gap-1 bg-black/55 p-0.5 sm:p-1 rounded-lg sm:rounded-xl border border-white/20" 
                               onClick={(e) => e.stopPropagation()}
                             >
                               <button
                                 type="button"
                                 onClick={(e) => handleOpenEditModule(e, mod)}
-                                className="text-white/80 hover:text-white p-1.5 rounded-lg hover:bg-white/20 transition-colors"
+                                className="text-white/85 hover:text-white p-1 sm:p-1.5 rounded-lg hover:bg-white/20 transition-colors"
                                 title="تعديل المقياس والغلاف"
                               >
-                                <Pencil className="w-3.5 h-3.5" />
+                                <Pencil className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
                               </button>
                               <button
                                 type="button"
                                 onClick={(e) => handleDeleteModule(e, mod.id)}
-                                className="text-white/80 hover:text-red-400 p-1.5 rounded-lg hover:bg-white/20 transition-colors"
+                                className="text-white/85 hover:text-red-400 p-1 sm:p-1.5 rounded-lg hover:bg-white/20 transition-colors"
                                 title="حذف المقياس"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <Trash2 className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
                               </button>
                             </div>
                           )}
                         </div>
 
-                        {/* Bottom Row: Title + Lesson Count + Arrow */}
-                        <div className="relative z-10 mt-auto pt-8">
-                          <h3 className="text-lg sm:text-xl font-bold text-white leading-snug drop-shadow-xs">
+                        {/* Bottom Row: Title Only */}
+                        <div className="relative z-10 mt-auto pt-4 sm:pt-8">
+                          <h3 className="text-sm sm:text-xl font-bold text-white leading-snug drop-shadow-xs line-clamp-2">
                             {mod.name}
                           </h3>
-                          <p className="text-xs text-neutral-300 mt-1 font-mono">
-                            {mod.lessons.length} دروس وموارد منشورة
-                          </p>
-
-                          <div className="pt-3 mt-3 border-t border-white/20 flex items-center justify-between text-xs text-neutral-200">
-                            <span>فتح صفحة المقياس</span>
-                            <ChevronLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
-                          </div>
                         </div>
                       </div>
                     );
@@ -2852,47 +3218,39 @@ export default function App() {
                     <div
                       key={mod.id}
                       onClick={() => setActiveModuleId(mod.id)}
-                      className="group bg-white hover:bg-neutral-50 rounded-3xl border border-neutral-200 p-6 flex flex-col justify-between shadow-2xs hover:shadow-md transition-all duration-200 cursor-pointer min-h-[200px]"
+                      className="group bg-white hover:bg-neutral-50 rounded-2xl sm:rounded-3xl border border-neutral-200 p-3.5 sm:p-6 flex flex-col justify-between shadow-2xs hover:shadow-md transition-transform duration-200 active:scale-[0.99] cursor-pointer min-h-[150px] sm:min-h-[185px] transform-gpu"
                     >
-                      <div className="flex items-start justify-between gap-4">
-                        <span className="w-8 h-8 rounded-xl bg-neutral-100 text-black font-mono text-xs font-bold flex items-center justify-center border border-neutral-200">
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg sm:rounded-xl bg-neutral-100 text-black font-mono text-[11px] sm:text-xs font-bold flex items-center justify-center border border-neutral-200 tabular-nums">
                           {index + 1}
                         </span>
 
                         {isAdmin && (
-                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center gap-0.5 sm:gap-1" onClick={(e) => e.stopPropagation()}>
                             <button
                               type="button"
                               onClick={(e) => handleOpenEditModule(e, mod)}
-                              className="text-neutral-400 hover:text-black p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
+                              className="text-neutral-400 hover:text-black p-1 sm:p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
                               title="تعديل المقياس والغلاف"
                             >
-                              <Pencil className="w-4 h-4" />
+                              <Pencil className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                             </button>
                             <button
                               type="button"
                               onClick={(e) => handleDeleteModule(e, mod.id)}
-                              className="text-neutral-300 hover:text-black p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
+                              className="text-neutral-300 hover:text-black p-1 sm:p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
                               title="حذف المقياس"
                             >
-                              <Trash2 className="w-4 h-4" />
+                              <Trash2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                             </button>
                           </div>
                         )}
                       </div>
 
-                      <div className="my-4">
-                        <h3 className="text-base sm:text-lg font-bold text-black leading-snug">
+                      <div className="mt-auto pt-4">
+                        <h3 className="text-sm sm:text-lg font-bold text-black leading-snug line-clamp-2">
                           {mod.name}
                         </h3>
-                        <p className="text-xs text-neutral-500 mt-1">
-                          {mod.lessons.length} دروس وموارد منشورة
-                        </p>
-                      </div>
-
-                      <div className="pt-3 border-t border-neutral-100 flex items-center justify-between text-xs text-neutral-500">
-                        <span>فتح صفحة المقياس</span>
-                        <ChevronLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
                       </div>
                     </div>
                   );
@@ -3300,109 +3658,113 @@ export default function App() {
         {(activeModule || isNewsView) && !isSubmissionsView && (
           <div className="w-full max-w-5xl mx-auto space-y-5 sm:space-y-6 px-0.5 sm:px-2 animate-in fade-in duration-150">
             
-            {/* Filter Bar: Scrolls naturally with the page without layout jumps */}
+            {/* Sticky Filter Bar: Solid white background pinned cleanly beneath the sticky top header on scroll */}
             {isNewsView ? (
-              <div className="w-full max-w-md mx-auto px-1 sm:px-2 mb-4" dir="rtl">
-                <div className="bg-black text-white p-1 sm:p-1.5 rounded-2xl shadow-lg border border-neutral-800 flex items-center justify-between gap-1 text-[11px] sm:text-sm">
-                  <button
-                    type="button"
-                    onClick={() => setNewsTypeFilter('all')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      newsTypeFilter === 'all'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    الكل
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewsTypeFilter('news')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      newsTypeFilter === 'news'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    أخبار
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewsTypeFilter('updates')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      newsTypeFilter === 'updates'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    مستجدات
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewsTypeFilter('announcements')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      newsTypeFilter === 'announcements'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    إعلانات
-                  </button>
+              <div className="sticky top-[64px] sm:top-[74px] z-30 w-full py-2 bg-white mb-2" dir="rtl">
+                <div className="w-full max-w-md mx-auto px-1 sm:px-2">
+                  <div className="bg-black text-white p-1 sm:p-1.5 rounded-2xl shadow-lg border border-neutral-800 flex items-center justify-between gap-1 text-[11px] sm:text-sm">
+                    <button
+                      type="button"
+                      onClick={() => setNewsTypeFilter('all')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        newsTypeFilter === 'all'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      الكل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewsTypeFilter('news')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        newsTypeFilter === 'news'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      أخبار
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewsTypeFilter('updates')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        newsTypeFilter === 'updates'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      مستجدات
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewsTypeFilter('announcements')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        newsTypeFilter === 'announcements'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      إعلانات
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
               <div 
-                className="w-full max-w-md mx-auto px-1 sm:px-2 mb-4"
+                className="sticky top-[64px] sm:top-[74px] z-30 w-full py-2 bg-white mb-2"
                 dir="rtl"
               >
-                <div className="bg-black text-white p-1 sm:p-1.5 rounded-2xl shadow-lg border border-neutral-800 flex items-center justify-between gap-1 text-[11px] sm:text-sm">
-                  <button
-                    type="button"
-                    onClick={() => setLessonTypeFilter('all')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      lessonTypeFilter === 'all'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    الكل
-                  </button>
+                <div className="w-full max-w-md mx-auto px-1 sm:px-2">
+                  <div className="bg-black text-white p-1 sm:p-1.5 rounded-2xl shadow-lg border border-neutral-800 flex items-center justify-between gap-1 text-[11px] sm:text-sm">
+                    <button
+                      type="button"
+                      onClick={() => setLessonTypeFilter('all')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        lessonTypeFilter === 'all'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      الكل
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setLessonTypeFilter('cour')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      lessonTypeFilter === 'cour'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    Cour
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setLessonTypeFilter('cour')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        lessonTypeFilter === 'cour'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      Cour
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setLessonTypeFilter('td')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      lessonTypeFilter === 'td'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    TD
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setLessonTypeFilter('td')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        lessonTypeFilter === 'td'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      TD
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setLessonTypeFilter('exercises')}
-                    className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
-                      lessonTypeFilter === 'exercises'
-                        ? 'bg-white text-black shadow-xs font-bold'
-                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
-                    }`}
-                  >
-                    تمارين
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setLessonTypeFilter('exercises')}
+                      className={`flex-1 py-1.5 sm:py-2 px-1 rounded-xl text-center font-semibold transition-all duration-150 cursor-pointer ${
+                        lessonTypeFilter === 'exercises'
+                          ? 'bg-white text-black shadow-xs font-bold'
+                          : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                      }`}
+                    >
+                      تمارين
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -3435,6 +3797,26 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
+                  {activeFeedLessons.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const firstLesson = sortedLessons[0] || activeFeedLessons[0];
+                        if (firstLesson) {
+                          handleOpenLikesControlModal(
+                            firstLesson,
+                            activeFeedLessons.map(l => String(l.id))
+                          );
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 text-black border border-neutral-300 rounded-xl text-[11px] sm:text-xs font-semibold transition-colors cursor-pointer"
+                      title="ضبط وتوزيع التفاعلات لعدة منشورات أو منشور واحد"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">ضبط التفاعلات</span>
+                    </button>
+                  )}
                   <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-xl text-xs font-semibold shadow-2xs">
                     <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
                     <span>{isNewsView ? 'نشر خبر جديد' : 'نشر جديد'}</span>
@@ -3510,23 +3892,19 @@ export default function App() {
                       key={lesson.id}
                       className="w-full bg-white rounded-3xl border border-neutral-200 overflow-hidden shadow-2xs hover:shadow-sm transition-all relative"
                     >
-                      {/* Pinned Post Indicator: Clean minimalist white pin shape on black pill badge positioned neatly at corner */}
+                      {/* Pinned Post Indicator: Clean pin icon ONLY without the word "مثبت" */}
                       {lesson.isPinned && (
                         <div 
-                          className="absolute top-3 left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black text-white text-[11px] font-semibold shadow-xs select-none"
-                          title="منشور مثبت في الأعلى"
+                          className="absolute top-3 left-3.5 z-20 w-7 h-7 rounded-full bg-black text-white flex items-center justify-center shadow-xs select-none"
+                          title="منشور مثبت"
+                          aria-label="منشور مثبت"
                         >
                           <Pin className="w-3.5 h-3.5 fill-white text-white stroke-[2]" />
-                          <span>مثبت</span>
                         </div>
                       )}
 
-                      {/* Post Header: 
-                          - 3. Clean Name KAOUANE fares (Checkmark badge completely REMOVED)
-                          - 3. Pinned Post Indicator: Minimalist white pin shape at corner
-                          - 3. Date Behavior: When pinned, publication date is HIDDEN completely. When unpinned, date is shown.
-                      */}
-                      <div className={`p-3.5 sm:p-5 ${lesson.isPinned ? 'pt-11 sm:pt-11' : ''} flex flex-wrap items-center justify-between gap-2.5 border-b border-neutral-100`}>
+                      {/* Post Header */}
+                      <div className={`p-3.5 sm:p-5 ${isAdmin && lesson.isPinned ? 'pt-11 sm:pt-11' : ''} flex flex-wrap items-center justify-between gap-2.5 border-b border-neutral-100`}>
                         <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
                           <img
                             src={ADMIN_AVATAR_URL}
@@ -3637,6 +4015,31 @@ export default function App() {
                                   <span className="hidden sm:inline">آلي: نشط</span>
                                 </>
                               )}
+                            </button>
+
+                            {/* Configure Per-Post Likes Rate (Admin only) */}
+                            <button
+                              type="button"
+                              onClick={() => handleOpenLikesControlModal(lesson)}
+                              className={`px-2 py-1.5 rounded-xl text-[11px] font-semibold transition-colors flex items-center gap-1 border cursor-pointer ${
+                                lesson.autoLikesMode === 'custom'
+                                  ? 'bg-black text-white border-black hover:bg-neutral-800'
+                                  : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                              }`}
+                              title="ضبط سرعة ومعدل الإعجابات لهذا المنشور"
+                            >
+                              <SlidersHorizontal className="w-3 h-3" />
+                              <span className="hidden sm:inline">
+                                {lesson.autoLikesMode === 'custom'
+                                  ? `+${lesson.autoLikesCustomCount ?? 0}/${lesson.autoLikesCustomInterval ?? 1}${
+                                      lesson.autoLikesCustomUnit === 'day'
+                                        ? 'ي'
+                                        : lesson.autoLikesCustomUnit === 'hour'
+                                          ? 'س'
+                                          : 'د'
+                                    }`
+                                  : 'معدل الإعجاب'}
+                              </span>
                             </button>
 
                             {/* Edit Post Button (Admin only) */}
@@ -4668,7 +5071,7 @@ export default function App() {
                 <div className="flex flex-wrap gap-2">
                   {(isNewsView
                     ? ['خبر هام', 'مستجدات', 'إعلان إداري', 'توجيه بيداغوجي', 'تذكير']
-                    : ['Cour', 'TD', 'تمارين', 'TP', 'ملخص']
+                    : ['Cour', 'TD', 'تمارين']
                   ).map(type => (
                     <button
                       key={type}
@@ -4689,7 +5092,7 @@ export default function App() {
                 </div>
                 {!newLessonType && !isNewsView && (
                   <p className="text-[11px] text-neutral-500 mt-1.5">
-                    اختر الفئة المناسبة للمنشور (Cour أو TD أو تمارين...) ليتم فرزه للطلبة بدقة.
+                    اختر الفئة المناسبة للمنشور (Cour أو TD أو تمارين) ليتم فرزه للطلبة بدقة.
                   </p>
                 )}
               </div>
@@ -4740,7 +5143,7 @@ export default function App() {
                 />
               </div>
 
-              {/* Comments Toggle on Publish */}
+              {/* Comments Toggle on Publish (Defaults strictly to OFF) */}
               <button
                 type="button"
                 onClick={() => setNewLessonCommentsEnabled(prev => !prev)}
@@ -4759,9 +5162,76 @@ export default function App() {
                   <span>إمكانية التعليق على هذا المنشور</span>
                 </div>
                 <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${newLessonCommentsEnabled ? 'bg-black text-white' : 'bg-white text-neutral-600 border border-neutral-300'}`}>
-                  {newLessonCommentsEnabled ? 'مفعّلة' : 'متوقفة'}
+                  {newLessonCommentsEnabled ? 'مفعّلة' : 'مطفأة'}
                 </span>
               </button>
+
+              {/* Likes Growth Rate Control on Publish */}
+              <div className="p-3.5 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-black">
+                    <SlidersHorizontal className="w-4 h-4 text-black" />
+                    <span>معدل الإعجابات التلقائية لهذا المنشور</span>
+                  </div>
+                  <div className="flex items-center gap-1 bg-white p-0.5 rounded-xl border border-neutral-200 text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setNewAutoLikesMode('default')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        newAutoLikesMode === 'default' ? 'bg-black text-white' : 'text-neutral-600 hover:text-black'
+                      }`}
+                    >
+                      افتراضي
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewAutoLikesMode('custom')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        newAutoLikesMode === 'custom' ? 'bg-black text-white' : 'text-neutral-600 hover:text-black'
+                      }`}
+                    >
+                      مخصص
+                    </button>
+                  </div>
+                </div>
+
+                {newAutoLikesMode === 'custom' && (
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div>
+                      <label className="block text-[11px] text-neutral-600 mb-1">عدد الإعجابات</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={newAutoLikesCount}
+                        onChange={(e) => setNewAutoLikesCount(Math.max(0, Number(e.target.value) || 0))}
+                        className="w-full px-3 py-1.5 bg-white border border-neutral-300 rounded-xl text-xs font-mono text-black focus:outline-none focus:ring-1 focus:ring-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-neutral-600 mb-1">كل</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={newAutoLikesInterval}
+                        onChange={(e) => setNewAutoLikesInterval(Math.max(1, Number(e.target.value) || 1))}
+                        className="w-full px-3 py-1.5 bg-white border border-neutral-300 rounded-xl text-xs font-mono text-black focus:outline-none focus:ring-1 focus:ring-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-neutral-600 mb-1">المدة الزمنية</label>
+                      <select
+                        value={newAutoLikesUnit}
+                        onChange={(e) => setNewAutoLikesUnit(e.target.value as AutoLikesRateUnit)}
+                        className="w-full px-2.5 py-1.5 bg-white border border-neutral-300 rounded-xl text-xs text-black focus:outline-none focus:ring-1 focus:ring-black"
+                      >
+                        <option value="minute">دقيقة</option>
+                        <option value="hour">ساعة</option>
+                        <option value="day">يوم</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* Multiple Images Upload */}
               <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
@@ -5020,7 +5490,7 @@ export default function App() {
                 <div className="flex flex-wrap gap-2">
                   {(isNewsView
                     ? ['خبر هام', 'مستجدات', 'إعلان إداري', 'توجيه بيداغوجي', 'تذكير']
-                    : ['Cour', 'TD', 'تمارين', 'TP', 'ملخص']
+                    : ['Cour', 'TD', 'تمارين']
                   ).map(type => (
                     <button
                       key={type}
@@ -5103,9 +5573,76 @@ export default function App() {
                   <span>إمكانية التعليق على هذا المنشور</span>
                 </div>
                 <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${editLessonCommentsEnabled ? 'bg-black text-white' : 'bg-white text-neutral-600 border border-neutral-300'}`}>
-                  {editLessonCommentsEnabled ? 'مفعّلة' : 'متوقفة'}
+                  {editLessonCommentsEnabled ? 'مفعّلة' : 'مطفأة'}
                 </span>
               </button>
+
+              {/* Likes Growth Rate Control inside Edit Modal */}
+              <div className="p-3.5 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-black">
+                    <SlidersHorizontal className="w-4 h-4 text-black" />
+                    <span>معدل الإعجابات التلقائية</span>
+                  </div>
+                  <div className="flex items-center gap-1 bg-white p-0.5 rounded-xl border border-neutral-200 text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setEditAutoLikesMode('default')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        editAutoLikesMode === 'default' ? 'bg-black text-white' : 'text-neutral-600 hover:text-black'
+                      }`}
+                    >
+                      افتراضي
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditAutoLikesMode('custom')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        editAutoLikesMode === 'custom' ? 'bg-black text-white' : 'text-neutral-600 hover:text-black'
+                      }`}
+                    >
+                      مخصص
+                    </button>
+                  </div>
+                </div>
+
+                {editAutoLikesMode === 'custom' && (
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div>
+                      <label className="block text-[11px] text-neutral-600 mb-1">عدد الإعجابات</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={editAutoLikesCount}
+                        onChange={(e) => setEditAutoLikesCount(Math.max(0, Number(e.target.value) || 0))}
+                        className="w-full px-3 py-1.5 bg-white border border-neutral-300 rounded-xl text-xs font-mono text-black focus:outline-none focus:ring-1 focus:ring-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-neutral-600 mb-1">كل</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={editAutoLikesInterval}
+                        onChange={(e) => setEditAutoLikesInterval(Math.max(1, Number(e.target.value) || 1))}
+                        className="w-full px-3 py-1.5 bg-white border border-neutral-300 rounded-xl text-xs font-mono text-black focus:outline-none focus:ring-1 focus:ring-black"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-neutral-600 mb-1">المدة الزمنية</label>
+                      <select
+                        value={editAutoLikesUnit}
+                        onChange={(e) => setEditAutoLikesUnit(e.target.value as AutoLikesRateUnit)}
+                        className="w-full px-2.5 py-1.5 bg-white border border-neutral-300 rounded-xl text-xs text-black focus:outline-none focus:ring-1 focus:ring-black"
+                      >
+                        <option value="minute">دقيقة</option>
+                        <option value="hour">ساعة</option>
+                        <option value="day">يوم</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* Manage Attached Images */}
               <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
@@ -5513,6 +6050,443 @@ export default function App() {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: ANNOUNCEMENT BANNER MANAGEMENT (Admin Only) */}
+      {isBannerAdminModalOpen && isAdmin && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto"
+          onClick={() => setIsBannerAdminModalOpen(false)}
+        >
+          <div
+            className="bg-white rounded-3xl border border-neutral-200 w-full max-w-lg p-6 sm:p-7 shadow-2xl my-8 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+            dir="rtl"
+          >
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-neutral-200">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-black text-white flex items-center justify-center">
+                  <Megaphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-black">إدارة شريط الإعلانات التلقائي</h3>
+                  <p className="text-xs text-neutral-500">يظهر بين أزرار السنوات وشبكة المقاييس مع حماية الصور</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsBannerAdminModalOpen(false)}
+                className="text-neutral-400 hover:text-black p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveBannerConfig} className="space-y-4">
+              {/* Toggle Banner Visibility */}
+              <button
+                type="button"
+                onClick={() => setDraftBannerEnabled(prev => !prev)}
+                className={`w-full flex items-center justify-between px-4 py-2.5 rounded-2xl border text-xs font-semibold transition-colors cursor-pointer ${
+                  draftBannerEnabled
+                    ? 'bg-neutral-50 text-black border-neutral-300'
+                    : 'bg-neutral-100 text-neutral-600 border-neutral-300'
+                }`}
+              >
+                <span>تفعيل عرض شريط الإعلانات للطلبة</span>
+                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${draftBannerEnabled ? 'bg-black text-white' : 'bg-white text-neutral-600 border border-neutral-300'}`}>
+                  {draftBannerEnabled ? 'مفعّل' : 'مخفي'}
+                </span>
+              </button>
+
+              {/* Interval Seconds Control */}
+              <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-2.5">
+                <label htmlFor="banner-interval-input" className="block text-xs font-bold text-black">
+                  مدة تبديل كل صورة (بالثواني):
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    id="banner-interval-input"
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={draftBannerInterval}
+                    onChange={(e) => setDraftBannerInterval(Math.max(1, Math.min(120, Number(e.target.value) || 1)))}
+                    className="w-24 px-3 py-2 bg-white border border-neutral-300 rounded-xl text-sm font-mono font-bold text-black focus:outline-none focus:ring-1 focus:ring-black"
+                  />
+                  <span className="text-xs text-neutral-600 font-semibold">ثانية</span>
+                  <div className="flex items-center gap-1 mr-auto">
+                    {[3, 4, 5, 8, 10].map(sec => (
+                      <button
+                        key={sec}
+                        type="button"
+                        onClick={() => setDraftBannerInterval(sec)}
+                        className={`px-2 py-1 rounded-lg text-[11px] font-mono font-semibold border cursor-pointer ${
+                          draftBannerInterval === sec
+                            ? 'bg-black text-white border-black'
+                            : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                        }`}
+                      >
+                        {sec}ث
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Upload Banner Images */}
+              <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-black">صور الإعلانات ({draftBannerImages.length})</span>
+                  <label className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-xl text-xs font-semibold text-black cursor-pointer transition-colors shadow-2xs">
+                    {isUploadingBannerImage ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-black" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 text-black" />
+                    )}
+                    <span>{isUploadingBannerImage ? 'جاري الرفع...' : 'إضافة صور إعلانية'}</span>
+                    <input
+                      type="file"
+                      multiple
+                      accept="image/*"
+                      onChange={handleBannerImageUpload}
+                      disabled={isUploadingBannerImage}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+
+                {draftBannerImages.length > 0 ? (
+                  <div className="space-y-2">
+                    {draftBannerImages.map((img, idx) => (
+                      <div key={img.id} className="flex items-center justify-between gap-2.5 p-2 bg-white rounded-xl border border-neutral-200">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-16 h-10 rounded-lg overflow-hidden border border-neutral-200 shrink-0 bg-neutral-100">
+                            <CloudImage src={img.url} alt={img.name} className="w-full h-full object-cover" />
+                          </div>
+                          <span className="text-xs font-medium text-black truncate">
+                            {idx + 1}. {img.name || 'إعلان'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDraftBannerImages(prev => prev.filter(item => item.id !== img.id))}
+                          className="p-1.5 rounded-lg text-neutral-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer shrink-0"
+                          title="حذف الصورة"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-neutral-500 text-center py-3">لم يتم إضافة أي صور إعلانية بعد</p>
+                )}
+              </div>
+
+              {bannerError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-2xl text-xs text-red-700 font-medium">
+                  {bannerError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-neutral-200">
+                <button
+                  type="button"
+                  onClick={() => setIsBannerAdminModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-neutral-600 hover:bg-neutral-100 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUploadingBannerImage || isSavingBanner}
+                  className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-black hover:bg-neutral-800 disabled:opacity-40 flex items-center gap-2 cursor-pointer shadow-xs"
+                >
+                  {isSavingBanner && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>حفظ شريط الإعلانات</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 6: SINGLE OR MULTI-POST LIKES RATE & AMOUNT CONTROL (Admin Only) */}
+      {likesControlLesson && isAdmin && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setLikesControlLesson(null)}
+        >
+          <div
+            className="bg-white rounded-3xl border border-neutral-200 w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 sm:p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            dir="rtl"
+          >
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-neutral-200">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-black text-white flex items-center justify-center shrink-0">
+                  <Heart className="w-4 h-4 fill-white" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm sm:text-base font-bold text-black truncate">التحكم بتفاعلات المنشورات</h3>
+                  <p className="text-[11px] text-neutral-500 truncate">
+                    {selectedLikesPostIds.length > 1
+                      ? `محدد ${selectedLikesPostIds.length} منشورات للتطبيق الجماعي`
+                      : likesControlLesson.title}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLikesControlLesson(null)}
+                className="text-neutral-400 hover:text-black p-1 rounded-lg cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSavePostLikesRate} className="space-y-4">
+              {/* Target Post Selector: Single, Multiple, or All Posts in Active Feed */}
+              <div className="p-3.5 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-black">
+                    تطبيق على المنشورات ({selectedLikesPostIds.length}/{activeFeedLessons.length}):
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLikesPostIds(activeFeedLessons.map(l => String(l.id)))}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-neutral-100 border border-neutral-300 text-[11px] font-semibold text-black cursor-pointer"
+                    >
+                      تحديد الكل
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLikesPostIds([])}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-neutral-100 border border-neutral-300 text-[11px] font-semibold text-neutral-600 cursor-pointer"
+                    >
+                      إلغاء الكل
+                    </button>
+                  </div>
+                </div>
+
+                <div className="max-h-36 overflow-y-auto space-y-1.5 pr-0.5">
+                  {[...activeFeedLessons]
+                    .sort((a, b) => {
+                      const aPin = a.isPinned ? 1 : 0;
+                      const bPin = b.isPinned ? 1 : 0;
+                      if (aPin !== bPin) return bPin - aPin;
+                      return (b.timestamp || 0) - (a.timestamp || 0);
+                    })
+                    .map(post => {
+                      const postIdStr = String(post.id);
+                      const isSelected = selectedLikesPostIds.includes(postIdStr);
+                      return (
+                        <label
+                          key={postIdStr}
+                          className={`flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl border text-xs cursor-pointer transition-colors ${
+                            isSelected
+                              ? 'bg-white border-black text-black shadow-2xs'
+                              : 'bg-neutral-100/70 border-neutral-200 text-neutral-600 hover:bg-white'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {
+                                setSelectedLikesPostIds(prev =>
+                                  prev.includes(postIdStr)
+                                    ? prev.filter(id => id !== postIdStr)
+                                    : [...prev, postIdStr]
+                                );
+                              }}
+                              className="w-4 h-4 accent-black rounded cursor-pointer shrink-0"
+                            />
+                            <span className="truncate font-semibold">{post.title}</span>
+                          </div>
+                          <span className="text-[11px] font-mono text-neutral-500 shrink-0 tabular-nums">
+                            {post.likesCount || 0} ❤
+                          </span>
+                        </label>
+                      );
+                    })}
+                </div>
+              </div>
+
+              {/* Direct Immediate Likes Adjustment (+/-) */}
+              <div className="p-3.5 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-black">تعديل فوري للإعجابات الحالية:</span>
+                  <span className="text-xs font-mono font-bold text-black" dir="ltr">
+                    {ctrlLikesDelta > 0 ? `+${ctrlLikesDelta}` : ctrlLikesDelta}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[-10, -5, -1, 0, 1, 5, 10].map(val => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setCtrlLikesDelta(prev => (val === 0 ? 0 : prev + val))}
+                      className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono font-bold cursor-pointer transition-colors ${
+                        val === 0
+                          ? 'bg-white text-neutral-600 border-neutral-300 hover:bg-neutral-100'
+                          : 'bg-white text-black border-neutral-300 hover:bg-black hover:text-white'
+                      }`}
+                      dir="ltr"
+                    >
+                      {val === 0 ? 'تصفير' : val > 0 ? `+${val}` : val}
+                    </button>
+                  ))}
+                  <input
+                    type="number"
+                    value={ctrlLikesDelta}
+                    onChange={(e) => setCtrlLikesDelta(parseInt(e.target.value, 10) || 0)}
+                    className="w-20 px-2.5 py-1 bg-white border border-neutral-300 rounded-lg text-xs font-mono font-bold text-black text-center focus:outline-none focus:ring-1 focus:ring-black"
+                    dir="ltr"
+                  />
+                </div>
+              </div>
+
+              {/* Toggle Automated Growth ON/OFF */}
+              <button
+                type="button"
+                onClick={() => setCtrlLikesEnabled(prev => !prev)}
+                className={`w-full flex items-center justify-between px-4 py-2.5 rounded-2xl border text-xs font-semibold transition-colors cursor-pointer ${
+                  ctrlLikesEnabled
+                    ? 'bg-neutral-50 text-black border-neutral-300'
+                    : 'bg-neutral-100 text-neutral-600 border-neutral-300'
+                }`}
+              >
+                <span>تشغيل النمو التلقائي للإعجابات</span>
+                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold ${ctrlLikesEnabled ? 'bg-black text-white' : 'bg-white text-neutral-600 border border-neutral-300'}`}>
+                  {ctrlLikesEnabled ? 'نشط' : 'متوقف'}
+                </span>
+              </button>
+
+              {/* Mode Selector */}
+              <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-black">نمط الزيادة:</span>
+                  <div className="flex items-center gap-1 bg-white p-0.5 rounded-xl border border-neutral-200 text-[11px] font-semibold">
+                    <button
+                      type="button"
+                      onClick={() => setCtrlLikesMode('default')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        ctrlLikesMode === 'default' ? 'bg-black text-white' : 'text-neutral-600 hover:text-black'
+                      }`}
+                    >
+                      تلقائي افتراضي
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCtrlLikesMode('custom')}
+                      className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                        ctrlLikesMode === 'custom' ? 'bg-black text-white' : 'text-neutral-600 hover:text-black'
+                      }`}
+                    >
+                      معدل مخصص
+                    </button>
+                  </div>
+                </div>
+
+                {ctrlLikesMode === 'custom' ? (
+                  <div className="space-y-3 pt-1">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[11px] text-neutral-600 mb-1">عدد الإعجابات</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={ctrlLikesCount}
+                          onChange={(e) => setCtrlLikesCount(Math.max(0, Number(e.target.value) || 0))}
+                          className="w-full px-3 py-2 bg-white border border-neutral-300 rounded-xl text-xs font-mono font-bold text-black focus:outline-none focus:ring-1 focus:ring-black"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-neutral-600 mb-1">كل</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={ctrlLikesInterval}
+                          onChange={(e) => setCtrlLikesInterval(Math.max(1, Number(e.target.value) || 1))}
+                          className="w-full px-3 py-2 bg-white border border-neutral-300 rounded-xl text-xs font-mono font-bold text-black focus:outline-none focus:ring-1 focus:ring-black"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-neutral-600 mb-1">الوحدة</label>
+                        <select
+                          value={ctrlLikesUnit}
+                          onChange={(e) => setCtrlLikesUnit(e.target.value as AutoLikesRateUnit)}
+                          className="w-full px-2.5 py-2 bg-white border border-neutral-300 rounded-xl text-xs text-black focus:outline-none focus:ring-1 focus:ring-black"
+                        >
+                          <option value="minute">دقيقة</option>
+                          <option value="hour">ساعة</option>
+                          <option value="day">يوم</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Quick Rate Presets */}
+                    <div className="flex flex-wrap gap-1.5">
+                      {[
+                        { label: '+2 / دقيقة', count: 2, interval: 1, unit: 'minute' as const },
+                        { label: '+5 / دقيقة', count: 5, interval: 1, unit: 'minute' as const },
+                        { label: '+10 / ساعة', count: 10, interval: 1, unit: 'hour' as const },
+                        { label: '+30 / ساعة', count: 30, interval: 1, unit: 'hour' as const },
+                        { label: '+100 / يوم', count: 100, interval: 1, unit: 'day' as const },
+                      ].map(preset => (
+                        <button
+                          key={preset.label}
+                          type="button"
+                          onClick={() => {
+                            setCtrlLikesCount(preset.count);
+                            setCtrlLikesInterval(preset.interval);
+                            setCtrlLikesUnit(preset.unit);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-white hover:bg-neutral-100 border border-neutral-300 text-[11px] font-semibold text-black cursor-pointer"
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <p className="text-[11px] text-neutral-600 leading-relaxed">
+                      المعدل التقريبي: <span className="font-bold text-black">~{ctrlLikesCount} إعجاب كل {ctrlLikesInterval} {ctrlLikesUnit === 'minute' ? 'دقيقة' : ctrlLikesUnit === 'hour' ? 'ساعة' : 'يوم'}</span> — تتوزع الزيادة بشكل عشوائي غير منتظم ومتباين بين المنشورات.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-neutral-500">
+                    يعمل وفق المنحنى العشوائي الافتراضي للمنصة.
+                  </p>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-2 border-t border-neutral-200">
+                <button
+                  type="button"
+                  onClick={() => setLikesControlLesson(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-neutral-600 hover:bg-neutral-100 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingLikesRate || selectedLikesPostIds.length === 0}
+                  className="px-5 py-2.5 rounded-xl text-xs font-bold text-white bg-black hover:bg-neutral-800 disabled:opacity-40 flex items-center gap-2 cursor-pointer shadow-xs"
+                >
+                  {isSavingLikesRate && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>
+                    {selectedLikesPostIds.length > 1
+                      ? `تطبيق على (${selectedLikesPostIds.length}) منشورات`
+                      : 'حفظ إعدادات التفاعل'}
+                  </span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

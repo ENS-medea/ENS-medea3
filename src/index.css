@@ -7,9 +7,21 @@
   }
 
   html, body {
-    touch-action: pan-x pan-y;
+    touch-action: pan-y;
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+    overflow-x: clip;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
+}
+
+.no-save-media {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  -webkit-user-drag: none !important;
+  touch-action: pan-y !important;
 }
 
 /* Smooth custom scrollbars */

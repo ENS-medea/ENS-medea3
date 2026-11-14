@@ -13,7 +13,14 @@ import {
   serverTimestamp,
   increment
 } from 'firebase/firestore';
-import { ModuleItem, LessonItem, SpecializationItem, StudentSubmissionItem } from '../types';
+import {
+  ModuleItem,
+  LessonItem,
+  SpecializationItem,
+  StudentSubmissionItem,
+  AnnouncementBannerConfig,
+  AutoLikesRateUnit
+} from '../types';
 import { hashString } from './likesAlgorithm';
 
 /**
@@ -171,6 +178,12 @@ function sanitizeLessonsForFirestore(lessons: LessonItem[], fallbackModuleId: st
     autoLikesEnabled: lesson.autoLikesEnabled !== false,
     frozenAutoLikes: typeof lesson.frozenAutoLikes === 'number' ? lesson.frozenAutoLikes : null,
     autoLikesResumedAt: typeof lesson.autoLikesResumedAt === 'number' ? lesson.autoLikesResumedAt : null,
+    autoLikesMode: lesson.autoLikesMode === 'custom' ? 'custom' : 'default',
+    autoLikesCustomCount: typeof lesson.autoLikesCustomCount === 'number' ? Math.max(0, lesson.autoLikesCustomCount) : null,
+    autoLikesCustomInterval: typeof lesson.autoLikesCustomInterval === 'number' ? Math.max(1, lesson.autoLikesCustomInterval) : null,
+    autoLikesCustomUnit: lesson.autoLikesCustomUnit === 'hour' || lesson.autoLikesCustomUnit === 'day' || lesson.autoLikesCustomUnit === 'minute' ? lesson.autoLikesCustomUnit : null,
+    autoLikesBaselineLikes: typeof lesson.autoLikesBaselineLikes === 'number' ? Math.max(0, lesson.autoLikesBaselineLikes) : null,
+    autoLikesBaselineAt: typeof lesson.autoLikesBaselineAt === 'number' ? lesson.autoLikesBaselineAt : null,
     likesServerShard: lesson.likesServerShard === 1 || lesson.likesServerShard === 2
       ? lesson.likesServerShard
       : (hashString(String(lesson.id || '')) % 2 === 0 ? 1 : 2),
@@ -875,12 +888,18 @@ export interface ShardLikeState {
   autoLikesEnabled: boolean;
   frozenAutoLikes: number | null;
   autoLikesResumedAt: number | null;
+  autoLikesMode?: 'default' | 'custom';
+  autoLikesCustomCount?: number | null;
+  autoLikesCustomInterval?: number | null;
+  autoLikesCustomUnit?: AutoLikesRateUnit | null;
+  autoLikesBaselineLikes?: number | null;
+  autoLikesBaselineAt?: number | null;
   likesCount: number;
   serverShard: 1 | 2;
 }
 
 /**
- * Syncs a lesson's complete likes state (automated + real user likes + admin pause state + manual offset)
+ * Syncs a lesson's complete likes state (automated + real user likes + admin pause state + manual offset + custom rate)
  * strictly to its assigned Likes shard server (50% Server 1 / 50% Server 2).
  */
 export async function syncLessonLikesToShard(lesson: LessonItem): Promise<void> {
@@ -898,6 +917,12 @@ export async function syncLessonLikesToShard(lesson: LessonItem): Promise<void> 
       autoLikesEnabled: lesson.autoLikesEnabled !== false,
       frozenAutoLikes: typeof lesson.frozenAutoLikes === 'number' ? lesson.frozenAutoLikes : null,
       autoLikesResumedAt: typeof lesson.autoLikesResumedAt === 'number' ? lesson.autoLikesResumedAt : null,
+      autoLikesMode: lesson.autoLikesMode === 'custom' ? 'custom' : 'default',
+      autoLikesCustomCount: typeof lesson.autoLikesCustomCount === 'number' ? Math.max(0, lesson.autoLikesCustomCount) : null,
+      autoLikesCustomInterval: typeof lesson.autoLikesCustomInterval === 'number' ? Math.max(1, lesson.autoLikesCustomInterval) : null,
+      autoLikesCustomUnit: lesson.autoLikesCustomUnit || null,
+      autoLikesBaselineLikes: typeof lesson.autoLikesBaselineLikes === 'number' ? Math.max(0, lesson.autoLikesBaselineLikes) : null,
+      autoLikesBaselineAt: typeof lesson.autoLikesBaselineAt === 'number' ? lesson.autoLikesBaselineAt : null,
       likesCount: Number(lesson.likesCount) || 0,
       serverShard: shard,
       lastUpdated: serverTimestamp(),
@@ -939,6 +964,12 @@ export async function updateRealUserLikeOnShard(
         autoLikesEnabled: lesson.autoLikesEnabled !== false,
         frozenAutoLikes: typeof lesson.frozenAutoLikes === 'number' ? lesson.frozenAutoLikes : null,
         autoLikesResumedAt: typeof lesson.autoLikesResumedAt === 'number' ? lesson.autoLikesResumedAt : null,
+        autoLikesMode: lesson.autoLikesMode === 'custom' ? 'custom' : 'default',
+        autoLikesCustomCount: typeof lesson.autoLikesCustomCount === 'number' ? Math.max(0, lesson.autoLikesCustomCount) : null,
+        autoLikesCustomInterval: typeof lesson.autoLikesCustomInterval === 'number' ? Math.max(1, lesson.autoLikesCustomInterval) : null,
+        autoLikesCustomUnit: lesson.autoLikesCustomUnit || null,
+        autoLikesBaselineLikes: typeof lesson.autoLikesBaselineLikes === 'number' ? Math.max(0, lesson.autoLikesBaselineLikes) : null,
+        autoLikesBaselineAt: typeof lesson.autoLikesBaselineAt === 'number' ? lesson.autoLikesBaselineAt : null,
         likesCount: Math.max(0, updatedTotalLikes),
         serverShard: shard,
         lastUpdated: serverTimestamp(),
@@ -974,6 +1005,12 @@ export function subscribeLessonLikesFromShards(
             autoLikesEnabled: typeof data.autoLikesEnabled === 'boolean' ? data.autoLikesEnabled : undefined,
             frozenAutoLikes: typeof data.frozenAutoLikes === 'number' ? data.frozenAutoLikes : undefined,
             autoLikesResumedAt: typeof data.autoLikesResumedAt === 'number' ? data.autoLikesResumedAt : undefined,
+            autoLikesMode: data.autoLikesMode === 'custom' ? 'custom' : (data.autoLikesMode === 'default' ? 'default' : undefined),
+            autoLikesCustomCount: typeof data.autoLikesCustomCount === 'number' ? data.autoLikesCustomCount : undefined,
+            autoLikesCustomInterval: typeof data.autoLikesCustomInterval === 'number' ? data.autoLikesCustomInterval : undefined,
+            autoLikesCustomUnit: data.autoLikesCustomUnit === 'minute' || data.autoLikesCustomUnit === 'hour' || data.autoLikesCustomUnit === 'day' ? data.autoLikesCustomUnit : undefined,
+            autoLikesBaselineLikes: typeof data.autoLikesBaselineLikes === 'number' ? data.autoLikesBaselineLikes : undefined,
+            autoLikesBaselineAt: typeof data.autoLikesBaselineAt === 'number' ? data.autoLikesBaselineAt : undefined,
             likesCount: typeof data.likesCount === 'number' ? Math.max(0, data.likesCount) : undefined,
             serverShard: shard,
           });
@@ -1072,4 +1109,56 @@ export async function markStudentSubmissionReadInFirestore(submissionId: string,
 export async function deleteStudentSubmissionFromFirestore(submissionId: string): Promise<void> {
   const subRef = doc(db, 'student_submissions', String(submissionId));
   await deleteDoc(subRef);
+}
+
+// ==========================================
+// 6. ANNOUNCEMENT BANNER CONFIGURATION (Firestore `system_config/announcement_banner`)
+// ==========================================
+
+export function subscribeAnnouncementBanner(
+  onUpdate: (config: AnnouncementBannerConfig) => void
+): () => void {
+  try {
+    const bannerRef = doc(db, 'system_config', 'announcement_banner');
+    return onSnapshot(bannerRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        const images = Array.isArray(data.images)
+          ? data.images
+              .filter((img: any) => img && img.url)
+              .map((img: any) => ({
+                id: String(img.id || Date.now()),
+                url: String(img.url || ''),
+                name: String(img.name || 'إعلان'),
+              }))
+          : [];
+        const rawInterval = Number(data.intervalSeconds);
+        onUpdate({
+          images,
+          intervalSeconds: !isNaN(rawInterval) && rawInterval >= 1 ? Math.min(120, rawInterval) : 4,
+          enabled: data.enabled !== false,
+        });
+      } else {
+        onUpdate({ images: [], intervalSeconds: 4, enabled: true });
+      }
+    }, () => {
+      onUpdate({ images: [], intervalSeconds: 4, enabled: true });
+    });
+  } catch {
+    return () => {};
+  }
+}
+
+export async function saveAnnouncementBannerToFirestore(config: AnnouncementBannerConfig): Promise<void> {
+  const bannerRef = doc(db, 'system_config', 'announcement_banner');
+  await setDoc(bannerRef, {
+    images: (config.images || []).map(img => ({
+      id: String(img.id || Date.now()),
+      url: String(img.url || ''),
+      name: String(img.name || 'إعلان'),
+    })),
+    intervalSeconds: Math.max(1, Math.min(120, Number(config.intervalSeconds) || 4)),
+    enabled: config.enabled !== false,
+    lastUpdated: serverTimestamp(),
+  }, { merge: true });
 }
